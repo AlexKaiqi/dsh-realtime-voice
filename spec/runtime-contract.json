@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "name": "realtime-voice-runtime",
+  "profile": {
+    "required": ["id", "instructions", "tools"],
+    "owns": ["role", "instructions", "tool-whitelist"]
+  },
+  "route": {
+    "required": ["id", "model", "provider", "protocol", "credentialRef"],
+    "protocols": ["openai-webrtc", "doubao-realtime-duplex"]
+  }
+}

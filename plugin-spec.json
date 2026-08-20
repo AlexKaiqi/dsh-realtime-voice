@@ -1,0 +1,30 @@
+{
+  "specVersion": "0.2.0",
+  "name": "dsh-realtime-voice",
+  "pluginTypes": ["F3"],
+  "facts": {
+    "modelVisible": false,
+    "registersTools": false,
+    "filesystem": "none",
+    "persistentState": false,
+    "subprocess": false,
+    "subagents": false,
+    "temporaryResources": true,
+    "customProtocol": true
+  },
+  "package": { "path": "package.json" },
+  "tests": {
+    "contractTests": [
+      { "file": "test/service.test.mjs", "references": ["RealtimeVoiceService", "registeredRealtimeModels"] },
+      { "file": "test/transport.test.mjs", "references": ["callsUrl", "isSameOriginUpgrade", "safeUpstreamEvent"] }
+    ],
+    "runtimeTests": [
+      { "file": "test/assembly.test.mjs", "layer": "L1" },
+      { "file": "test/service.test.mjs", "layer": "L2" },
+      { "file": "test/transport.test.mjs", "layer": "L2" }
+    ]
+  },
+  "contracts": [
+    { "name": "realtime-voice-runtime", "file": "spec/runtime-contract.json", "versionField": "version" }
+  ]
+}

@@ -1,0 +1,7 @@
+- insert:
+    - id: realtime-voice
+      name: 'dsh-realtime-voice'
+      config:
+        enabled: true
+        maxContextChars: 12000
+        basePath: '/dsh-realtime-voice'
