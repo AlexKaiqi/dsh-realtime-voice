@@ -2,12 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { apply } from '../dsh/index.js'
 
-test('provides the runtime only after registered model dependencies exist', () => {
-  const provided = []
+test('registers provider adapters only after the multi-model runtime exists', () => {
+  const adapters = []
   const scope = {
-    settings: { describe: () => [] },
-    llm: { listProviders: () => [], listModels: async () => [] },
-    credentials: { resolve: async () => undefined },
+    realtimeModelRuntime: {
+      registerAdapter(adapter) { adapters.push(adapter); return () => {} },
+      publicModels: async () => [],
+    },
     webServer: {
       register() {},
       registerUpgrade() { return () => {} },
@@ -15,18 +16,17 @@ test('provides the runtime only after registered model dependencies exist', () =
   }
   const ctx = {
     inject(names, callback) {
-      assert.deepEqual(names, ['webServer', 'settings', 'credentials', 'llm'])
+      assert.deepEqual(names, ['webServer', 'realtimeModelRuntime'])
       callback(scope)
     },
-    provide(name, service) { provided.push({ name, service }) },
   }
-  apply(ctx, { enabled: true, maxContextChars: 12000 })
-  assert.deepEqual(provided.map(row => row.name), ['realtimeVoice'])
+  apply(ctx, { enabled: true, basePath: '/dsh-realtime-voice' })
+  assert.deepEqual(adapters.map(adapter => adapter.id), ['openai-webrtc', 'doubao-realtime-duplex'])
 })
 
 test('invalid config registers nothing', () => {
   let registrations = 0
   const ctx = { inject() { registrations += 1 }, provide() { registrations += 1 } }
-  assert.throws(() => apply(ctx, { enabled: true, maxContextChars: 10 }), /between/)
+  assert.throws(() => apply(ctx, { enabled: true, basePath: 'relative' }), /absolute URL path/)
   assert.equal(registrations, 0)
 })

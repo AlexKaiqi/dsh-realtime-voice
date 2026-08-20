@@ -1,88 +1,37 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { RealtimeVoiceService, registeredRealtimeModels } from '../dsh/service.js'
+import { doubaoRealtimeAdapter, openAIRealtimeAdapter, realtimeVoiceAdapters } from '../dsh/service.js'
 
-function scope() {
-  return {
-    settings: { describe: () => [] },
-    llm: { listProviders: () => [], listModels: async () => [] },
-    credentials: { resolve: async () => undefined },
-  }
+const profile = {
+  id: 'session-assistant',
+  tools: [{ type: 'function', name: 'submit_to_agent', parameters: { type: 'object' } }],
+  voice: { openai: 'marin', doubao: 'doubao-voice' },
 }
 
-test('discovers task-registered OpenAI and Doubao realtime models', () => {
-  const routes = registeredRealtimeModels([{ ns: 'multi-model-provider', value: {
-    connections: {
-      openai: { provider: 'openai', credentialRef: 'OPENAI_API_KEY' },
-      doubao: { provider: 'doubao-speech', credentialRefs: { apiKey: 'DOUBAO_API_KEY' } },
-    },
-    models: {
-      'openai/realtime': { connection: 'openai', enabled: true, task: 'realtime-speech', model: 'gpt-realtime' },
-      'doubao/realtime': { connection: 'doubao', enabled: true, task: 'realtime-speech', model: '1.2.6.1', profile: { protocol: 'doubao-realtime-duplex', voice: 'voice-id' } },
-    },
-  } }])
-  assert.deepEqual(routes.map(route => route.protocol), ['openai-webrtc', 'doubao-realtime-duplex'])
-  assert.equal(routes[1].credentialRef, 'DOUBAO_API_KEY')
+test('exports the exact GPT and Doubao adapter ids consumed by the multi-model catalog', () => {
+  assert.deepEqual(realtimeVoiceAdapters().map(adapter => adapter.id), ['openai-webrtc', 'doubao-realtime-duplex'])
 })
 
-test('keeps provider-selected Doubao voices even when task-model enablement is derived', () => {
-  const routes = registeredRealtimeModels([{ ns: 'multi-model-provider', value: {
-    connections: {
-      doubao: {
-        provider: 'doubao-speech',
-        credentialRefs: { apiKey: 'DOUBAO_API_KEY' },
-        models: [{ id: 'voice-id' }],
-      },
-    },
-    models: {
-      'doubao/realtime/voice-id': {
-        connection: 'doubao', enabled: false, task: 'realtime-speech', model: '1.2.6.1',
-        profile: { protocol: 'doubao-realtime-duplex', voice: 'voice-id' },
-      },
-    },
-  } }])
-  assert.deepEqual(routes.map(route => route.id), ['doubao/realtime/voice-id'])
-})
-
-test('profiles own role instructions and exact tool whitelist', () => {
-  const service = new RealtimeVoiceService(scope(), { maxContextChars: 4000 })
-  const dispose = service.registerProfile({
-    id: 'session-assistant',
-    instructions: context => `SESSION ROLE\n${context}`,
-    tools: [{ type: 'function', name: 'submit_to_agent', parameters: { type: 'object' } }],
-    voice: { openai: 'marin', doubao: 'doubao-voice' },
+test('assembles an OpenAI WebRTC session from runtime-owned route and role data', () => {
+  const session = openAIRealtimeAdapter.session({
+    route: { model: 'gpt-realtime', voice: '' },
+    profile,
+    instructions: 'SESSION ROLE\ncurrent draft',
   })
-  const openai = service.session({ profileId: 'session-assistant', route: { protocol: 'openai-webrtc', model: 'gpt-realtime' }, context: 'current draft' })
-  assert.match(openai.instructions, /SESSION ROLE/)
-  assert.deepEqual(openai.tools.map(tool => tool.name), ['submit_to_agent'])
-  const doubao = service.session({ profileId: 'session-assistant', route: { protocol: 'doubao-realtime-duplex', model: '1.2.6.1' }, context: 'current draft' })
-  assert.equal(doubao.session.audio.output.voice, 'doubao-voice')
-  dispose()
-  assert.throws(() => service.profile('session-assistant'), /Unknown/)
+  assert.equal(session.model, 'gpt-realtime')
+  assert.equal(session.audio.output.voice, 'marin')
+  assert.deepEqual(session.tools.map(tool => tool.name), ['submit_to_agent'])
+  assert.match(session.instructions, /current draft/)
 })
 
-test('bounds context and rejects duplicate or unsupported profiles', () => {
-  const service = new RealtimeVoiceService(scope(), { maxContextChars: 1000 })
-  service.registerProfile({ id: 'pet-assistant', instructions: context => context, tools: [] })
-  assert.throws(() => service.registerProfile({ id: 'pet-assistant', instructions: 'x', tools: [] }), /already registered/)
-  const session = service.session({ profileId: 'pet-assistant', route: { protocol: 'openai-webrtc', model: 'gpt-realtime' }, context: 'x'.repeat(2000) })
-  assert.equal(session.instructions.length, 1000)
-  assert.throws(() => service.session({ profileId: 'pet-assistant', route: { protocol: 'unknown', model: 'x' } }), /Unsupported/)
-})
-
-test('selects exact routes and publishes availability without exposing credentials', async () => {
-  const secret = 'never-return-this-key'
-  const service = new RealtimeVoiceService({
-    settings: { describe: () => [{ ns: 'multi-model-provider', value: {
-      connections: { doubao: { provider: 'doubao-speech', credentialRefs: { apiKey: 'DOUBAO_API_KEY' } } },
-      models: { 'doubao/realtime': { connection: 'doubao', enabled: true, task: 'realtime-speech', model: '1.2.6.1', profile: { protocol: 'doubao-realtime-duplex' } } },
-    } }] },
-    llm: { listProviders: () => [], listModels: async () => [] },
-    credentials: { resolve: async ref => ref === 'DOUBAO_API_KEY' ? { value: secret } : undefined },
+test('assembles a Doubao Duplex session without owning model discovery or credentials', () => {
+  const result = doubaoRealtimeAdapter.session({
+    route: { model: '1.2.6.1', voice: 'catalog-voice' },
+    profile,
+    instructions: 'SESSION ROLE\ncurrent draft',
   })
-  const route = await service.model('doubao/realtime', 'doubao-realtime-duplex')
-  assert.equal(route.model, '1.2.6.1')
-  const rows = await service.publicModels()
-  assert.equal(rows[0].available, true)
-  assert.doesNotMatch(JSON.stringify(rows), new RegExp(secret))
+  assert.equal(result.session.model, '1.2.6.1')
+  assert.equal(result.session.audio.output.voice, 'doubao-voice')
+  assert.deepEqual(result.session.tools.map(tool => tool.name), ['submit_to_agent'])
+  assert.ok(result.session.id)
 })

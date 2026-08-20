@@ -16,8 +16,14 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "ws": "^8.21.0"
   },
-  "peerDependencies": { "@deepseek-ai/cordis": "^4.0.1" },
-  "devDependencies": { "@deepseek-ai/cordis": "^4.0.1" },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "dsh-multi-model-provider": "^0.1.0-rc.9"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "dsh-multi-model-provider": "link:../dsh-multi-model-provider"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AlexKaiqi/dsh-realtime-voice.git"
@@ -33,11 +39,11 @@
   "dsh": {
     "inventory": {
       "summary": {
-        "zh": "消费模型注册表中的 Realtime 语音模型，为 Session 助手和宠物提供统一的角色、工具与 Provider 会话装配。",
-        "en": "Consumes registered Realtime speech models and assembles provider sessions, roles, and tools for session and pet assistants."
+        "zh": "为多模型运行时注册 GPT Realtime 与豆包 Duplex 适配，并提供浏览器实时音频传输。",
+        "en": "Registers GPT Realtime and Doubao Duplex adapters with the multi-model runtime and exposes browser audio transports."
       },
       "tags": ["voice", "realtime", "speech", "runtime"],
-      "dependencies": ["dsh-multi-model-provider", "@deepseek-ai/dsh-settings", "@deepseek-ai/dsh-credentials", "@deepseek-ai/dsh-llm"]
+      "dependencies": ["dsh-multi-model-provider"]
     },
     "bundle": { "patch": "./cordis.patch.yml" }
   }

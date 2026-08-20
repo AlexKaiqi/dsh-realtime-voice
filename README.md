@@ -1,11 +1,11 @@
 # dsh-realtime-voice
 
-独立的 Realtime 语音运行时。模型注册插件负责登记模型、能力、Provider 路由与凭据引用；本插件负责把这些注册结果变成可使用的语音会话。
+多模型运行时的 Realtime 语音适配层。`dsh-multi-model-provider` 负责模型目录、路由、凭据解析和角色 profile；本插件只注册 GPT Realtime 与豆包 Duplex adapter，并提供浏览器音频传输。
 
-业务插件不再直接判断 OpenAI/豆包，也不各自维护工具定义，而是注册 profile：
+业务插件不直接判断 OpenAI/豆包，而是向多模型运行时注册 profile：
 
 ```js
-const dispose = ctx.realtimeVoice.registerProfile({
+const dispose = ctx.realtimeModelRuntime.registerProfile({
   id: 'session-assistant',
   instructions: context => `...${context}`,
   tools: [/* 仅该角色允许的工具 */],
@@ -15,17 +15,17 @@ const dispose = ctx.realtimeVoice.registerProfile({
 然后按注册路由装配 Provider session：
 
 ```js
-const route = await ctx.realtimeVoice.model(routeId, protocol)
-ctx.realtimeVoice.session({ profileId, route, context })
+const route = await ctx.realtimeModelRuntime.model(routeId, protocol)
+ctx.realtimeModelRuntime.session({ profileId, route, context })
 ```
 
-当前已独立负责：
+本插件负责：
 
-- 模型注册表解析与规范化。
-- Profile 注册和权限边界。
+- 向 `realtimeModelRuntime` 注册 `openai-webrtc` 与 `doubao-realtime-duplex` adapter。
 - OpenAI Realtime WebRTC 的服务端初始化与长期 Key 隔离。
 - 豆包 Duplex 同源 WebSocket 代理、音频事件白名单和鉴权诊断。
-- 稳定、受限的上下文裁剪。
+
+模型发现、选择、凭据解析、上下文裁剪、Profile 与工具白名单均由 `dsh-multi-model-provider` 的 `realtimeModelRuntime` 管理。本插件不解析 Settings schema。
 
 浏览器入口为：
 

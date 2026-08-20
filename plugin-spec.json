@@ -15,7 +15,7 @@
   "package": { "path": "package.json" },
   "tests": {
     "contractTests": [
-      { "file": "test/service.test.mjs", "references": ["RealtimeVoiceService", "registeredRealtimeModels"] },
+      { "file": "test/service.test.mjs", "references": ["openAIRealtimeAdapter", "doubaoRealtimeAdapter", "realtimeVoiceAdapters"] },
       { "file": "test/transport.test.mjs", "references": ["callsUrl", "isSameOriginUpgrade", "safeUpstreamEvent"] }
     ],
     "runtimeTests": [
@@ -25,6 +25,6 @@
     ]
   },
   "contracts": [
-    { "name": "realtime-voice-runtime", "file": "spec/runtime-contract.json", "versionField": "version" }
+    { "name": "realtime-voice-adapters", "file": "spec/runtime-contract.json", "versionField": "version" }
   ]
 }

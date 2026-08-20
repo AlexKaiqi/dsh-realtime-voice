@@ -1,12 +1,11 @@
 {
   "version": 1,
-  "name": "realtime-voice-runtime",
-  "profile": {
-    "required": ["id", "instructions", "tools"],
-    "owns": ["role", "instructions", "tool-whitelist"]
-  },
+  "name": "realtime-voice-adapters",
+  "runtime": "dsh-multi-model-provider/realtimeModelRuntime",
   "route": {
-    "required": ["id", "model", "provider", "protocol", "credentialRef"],
+    "required": ["id", "model", "provider", "protocol", "adapter"],
     "protocols": ["openai-webrtc", "doubao-realtime-duplex"]
-  }
+  },
+  "owns": ["provider-wire-protocol", "browser-transport"],
+  "doesNotOwn": ["model-catalog", "credential-resolution", "role-profile"]
 }
