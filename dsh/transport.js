@@ -5,6 +5,7 @@ import WebSocket, { WebSocketServer } from 'ws'
 export const DOUBAO_DUPLEX_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue'
 const MAX_BODY_BYTES = 256 * 1024
 const MAX_AUDIO_BASE64_CHARS = 256 * 1024
+const MODEL_PROBE_HEADER = 'x-dsh-model-probe'
 
 function object(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
@@ -48,6 +49,19 @@ export function isSameOriginUpgrade(req) {
   }
 }
 
+export function authorizeModelProbe(req) {
+  if (req.headers?.[MODEL_PROBE_HEADER] !== '1') {
+    return { ok: false, error: 'missing model probe request marker' }
+  }
+  const fetchSite = req.headers?.['sec-fetch-site']
+  if (typeof fetchSite === 'string' && fetchSite !== 'same-origin') {
+    return { ok: false, error: 'model probe must be same-origin' }
+  }
+  return isSameOriginUpgrade(req)
+    ? { ok: true }
+    : { ok: false, error: 'model probe must be a same-origin Settings request' }
+}
+
 function rejectUpgrade(socket, status = '403 Forbidden', message = 'forbidden') {
   socket.end([
     `HTTP/1.1 ${status}`,
@@ -85,6 +99,63 @@ async function describeUnexpectedResponse(response) {
     diagnostic = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500)
   }
   return [`HTTP ${status}`, diagnostic, logID ? `X-Tt-Logid ${logID}` : ''].filter(Boolean).join(' · ')
+}
+
+export function probeDoubaoDuplex({ endpoint, apiKey, model, voice }, timeoutMs = 20_000) {
+  return new Promise((resolve, reject) => {
+    const started = performance.now()
+    const upstream = new WebSocket(String(endpoint || DOUBAO_DUPLEX_ENDPOINT), {
+      headers: { 'X-Api-Key': String(apiKey || '') },
+      handshakeTimeout: timeoutMs,
+    })
+    let settled = false
+    const finish = error => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close()
+      if (error) reject(error)
+      else resolve({ latencyMs: Math.round(performance.now() - started) })
+    }
+    const timer = setTimeout(() => finish(new Error('豆包 Realtime 连接测试超时')), timeoutMs)
+    upstream.on('open', () => {
+      upstream.send(JSON.stringify({
+        type: 'session.create',
+        event_id: randomUUID(),
+        session: {
+          type: 'realtime',
+          id: randomUUID(),
+          model: String(model || '1.2.6.1'),
+          instructions: 'Connection test. Do not produce a response.',
+          audio: {
+            input: { format: { type: 'pcm', rate: 16000 } },
+            output: { format: { type: 'pcm_s16le', rate: 24000 }, voice: String(voice || 'zh_female_vv_jupiter_bigtts') },
+          },
+          tools: [],
+        },
+      }))
+    })
+    upstream.on('message', (payload, binary) => {
+      if (binary) {
+        finish(new Error('豆包 Realtime 连接测试收到意外二进制响应'))
+        return
+      }
+      let event
+      try { event = JSON.parse(Buffer.isBuffer(payload) ? payload.toString('utf8') : String(payload)) } catch { event = null }
+      if (event?.type === 'session.created') finish()
+      if (event?.type === 'error') finish(new Error(String(event.error?.message || '豆包 Realtime 拒绝了会话')))
+    })
+    upstream.on('unexpected-response', (_request, response) => {
+      void describeUnexpectedResponse(response).then(
+        detail => finish(new Error(`豆包 Realtime 鉴权失败：${detail}`)),
+        () => finish(new Error(`豆包 Realtime 鉴权失败：HTTP ${response.statusCode || 'unknown'}`)),
+      )
+    })
+    upstream.on('error', error => finish(new Error(`豆包 Realtime 连接失败：${error?.message || error}`)))
+    upstream.on('close', (code, reason) => {
+      if (!settled) finish(new Error(`豆包 Realtime 在完成测试前关闭：${reason?.toString() || `code ${code}`}`))
+    })
+  })
 }
 
 function parseLocalMessage(data, isBinary) {
@@ -317,10 +388,45 @@ function registerModelsRoute(scope, service, path) {
   })
 }
 
+function registerDoubaoProbe(scope, service, path) {
+  scope.webServer.register({
+    kind: 'exact',
+    path,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' })
+        res.end()
+        return
+      }
+      const auth = authorizeModelProbe(req)
+      if (!auth.ok) {
+        sendJson(res, 403, { ok: false, error: auth.error })
+        return
+      }
+      try {
+        const route = await service.model(undefined, 'doubao-realtime-duplex')
+        if (!route) throw new Error('模型注册表中没有已启用的豆包 Realtime Duplex 路由')
+        const credential = await service.credential(route)
+        if (!credential.value) throw new Error(`未配置 ${credential.credentialRef || 'DOUBAO_API_KEY'}`)
+        const result = await probeDoubaoDuplex({
+          endpoint: route.endpoint,
+          apiKey: credential.value,
+          model: route.model,
+          voice: route.voice,
+        })
+        sendJson(res, 200, { ok: true, observedAt: new Date().toISOString(), ...result })
+      } catch (error) {
+        sendJson(res, 502, { ok: false, error: String(error?.message || error) })
+      }
+    },
+  })
+}
+
 export function registerRealtimeTransport(scope, service, config = {}) {
   const basePath = String(config.basePath || '/dsh-realtime-voice').replace(/\/+$/, '')
   registerModelsRoute(scope, service, `${basePath}/models`)
   registerOpenAISession(scope, service, `${basePath}/openai/session`)
+  registerDoubaoProbe(scope, service, `${basePath}/doubao/probe`)
   if (typeof scope.webServer.registerUpgrade === 'function') {
     registerDoubaoUpgrade(scope, service, `${basePath}/doubao`)
   }
