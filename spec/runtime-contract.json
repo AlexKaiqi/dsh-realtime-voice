@@ -1,11 +1,34 @@
 {
-  "version": 1,
-  "name": "realtime-voice-adapters",
+  "version": 2,
+  "name": "realtime-voice-provider-transport",
   "runtime": "dsh-multi-model-provider/realtimeModelRuntime",
   "route": {
     "required": ["id", "model", "provider", "protocol", "adapter"],
-    "protocols": ["openai-webrtc", "doubao-realtime-duplex"]
+    "protocols": ["openai-webrtc", "doubao-realtime-duplex"],
+    "trustedOrigins": {
+      "openai-webrtc": ["https://api.openai.com"],
+      "doubao-realtime-duplex": ["wss://openspeech.bytedance.com"]
+    },
+    "browserAuthorization": {
+      "httpMarkers": ["x-dsh-realtime-voice", "x-dsh-model-probe"],
+      "websocketSubprotocol": "dsh-realtime-voice-v1",
+      "sameOrigin": true
+    }
   },
-  "owns": ["provider-wire-protocol", "browser-transport"],
-  "doesNotOwn": ["model-catalog", "credential-resolution", "role-profile"]
+  "clientService": {
+    "name": "realtimeVoice",
+    "methods": ["capabilities", "models", "open", "recognize", "readAloud"],
+    "capabilities": ["secureContext", "realtime", "recognition", "readAloud", "voices"],
+    "handle": ["id", "subscribe", "updateContext", "resolveTool", "interrupt", "close"],
+    "events": {
+      "status": ["connected", "status"],
+      "phase": ["phase"],
+      "transcript": ["role", "text", "final"],
+      "tool": ["callId", "name", "arguments"],
+      "error": ["code", "message", "recoverable"],
+      "closed": []
+    }
+  },
+  "owns": ["provider-wire-protocol", "browser-transport", "browser-media-lifecycle", "provider-event-normalization"],
+  "doesNotOwn": ["model-catalog", "credential-resolution", "role-profile", "drafts", "agent-submission"]
 }

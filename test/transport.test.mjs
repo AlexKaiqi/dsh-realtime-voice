@@ -1,29 +1,110 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { callsUrl, isSameOriginUpgrade, safeUpstreamEvent } from '../dsh/transport.js'
+import {
+  authorizeBrowserRequest,
+  authorizeWebSocketRequest,
+  callsUrl,
+  createStartupQueue,
+  isSameOriginUpgrade,
+  REALTIME_WS_PROTOCOL,
+  safeUpstreamEvent,
+  sanitizeProviderEvent,
+  transportPolicy,
+  validateProviderRoute,
+} from '../dsh/transport.js'
 
 test('normalizes OpenAI-compatible base URLs without duplicating v1', () => {
   assert.equal(callsUrl('https://api.openai.com/v1'), 'https://api.openai.com/v1/realtime/calls')
   assert.equal(callsUrl('https://proxy.example.test/'), 'https://proxy.example.test/v1/realtime/calls')
 })
 
-test('accepts only same-origin browser websocket upgrades', () => {
-  assert.equal(isSameOriginUpgrade({ headers: { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' } }), true)
-  assert.equal(isSameOriginUpgrade({ headers: { origin: 'https://evil.example', host: '127.0.0.1:3080' } }), false)
-  assert.equal(isSameOriginUpgrade({ headers: { host: '127.0.0.1:3080' } }), false)
+test('requires same-origin Origin and Host plus marker and Sec-Fetch-Site when present', () => {
+  const valid = { headers: { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080', 'x-dsh-realtime-voice': '1', 'sec-fetch-site': 'same-origin' } }
+  assert.equal(isSameOriginUpgrade(valid), true)
+  assert.deepEqual(authorizeBrowserRequest(valid), { ok: true })
+  assert.equal(authorizeBrowserRequest({ headers: { ...valid.headers, origin: 'https://evil.example' } }).ok, false)
+  assert.equal(authorizeBrowserRequest({ headers: { ...valid.headers, 'sec-fetch-site': 'cross-site' } }).ok, false)
+  assert.equal(authorizeBrowserRequest({ headers: { origin: valid.headers.origin, host: valid.headers.host } }).ok, false)
 })
 
-test('whitelists local Doubao events and preserves the server-owned profile on context update', () => {
-  const state = { id: 'session-id', profileId: 'session-assistant', route: { protocol: 'doubao-realtime-duplex', model: '1.2.6.1' } }
-  const service = {
-    session(input) {
-      assert.equal(input.profileId, 'session-assistant')
-      return { session: { id: 'new-id', instructions: `context:${input.context}`, tools: [] } }
+test('authorizes browser websocket upgrades through a real WebSocket subprotocol', () => {
+  const valid = {
+    headers: {
+      origin: 'http://127.0.0.1:3080',
+      host: '127.0.0.1:3080',
+      'sec-fetch-site': 'same-origin',
+      'sec-websocket-protocol': REALTIME_WS_PROTOCOL,
     },
   }
-  const update = safeUpstreamEvent({ type: 'context.update', context: 'new focus' }, state, service)
-  assert.equal(update.type, 'session.update')
-  assert.equal(update.session.id, 'session-id')
-  assert.throws(() => safeUpstreamEvent({ type: 'arbitrary.upstream.command' }, state, service), /unsupported/)
-  assert.throws(() => safeUpstreamEvent({ type: 'input_audio_buffer.append', audio: '../bad' }, state, service), /invalid/)
+  assert.deepEqual(authorizeWebSocketRequest(valid), { ok: true })
+  assert.equal(authorizeWebSocketRequest({ headers: { ...valid.headers, 'sec-websocket-protocol': '' } }).ok, false)
+  assert.equal(authorizeWebSocketRequest({ headers: { ...valid.headers, origin: 'https://evil.example' } }).ok, false)
+})
+
+test('validates route identity and official origins before credentials are used', () => {
+  const policy = transportPolicy()
+  const openaiRoute = { model: 'gpt-realtime', provider: 'openai', protocol: 'openai-webrtc', adapter: 'openai-webrtc' }
+  const doubaoRoute = { model: '1.2.6.1', provider: 'doubao-speech', protocol: 'doubao-realtime-duplex', adapter: 'doubao-realtime-duplex' }
+  const openai = validateProviderRoute(openaiRoute, 'openai-webrtc', policy)
+  assert.equal(openai.baseURL, 'https://api.openai.com/v1')
+  assert.throws(() => validateProviderRoute({ ...openaiRoute, provider: 'other' }, 'openai-webrtc', policy), /provider/)
+  assert.throws(() => validateProviderRoute({ ...openaiRoute, baseURL: 'https://proxy.example/v1' }, 'openai-webrtc', policy), /not trusted/)
+  assert.throws(() => validateProviderRoute({ ...doubaoRoute, endpoint: 'ws://openspeech.bytedance.com/path' }, 'doubao-realtime-duplex', policy), /WSS/)
+  assert.throws(() => validateProviderRoute({ ...openaiRoute, protocol: undefined }, 'openai-webrtc', policy), /protocol/)
+  assert.throws(() => validateProviderRoute({ ...openaiRoute, adapter: undefined }, 'openai-webrtc', policy), /adapter/)
+  const custom = transportPolicy({ trustedOpenAIOrigins: ['http://127.0.0.1:4321'], trustedDoubaoOrigins: ['ws://127.0.0.1:4322'] })
+  assert.equal(validateProviderRoute({ ...openaiRoute, baseURL: 'http://127.0.0.1:4321/v1' }, 'openai-webrtc', custom).baseURL, 'http://127.0.0.1:4321/v1')
+  assert.equal(validateProviderRoute({ ...doubaoRoute, endpoint: 'ws://127.0.0.1:4322/path' }, 'doubao-realtime-duplex', custom).endpoint, 'ws://127.0.0.1:4322/path')
+})
+
+test('queues a bounded ordered startup set and rejects overflow', () => {
+  const queue = createStartupQueue(2)
+  queue.push({ type: 'one' })
+  queue.push({ type: 'two' })
+  assert.throws(() => queue.push({ type: 'three' }), /overflow/)
+  const values = []
+  queue.flush(event => values.push(event.type))
+  assert.deepEqual(values, ['one', 'two'])
+  assert.equal(queue.size, 0)
+})
+
+test('whitelists Doubao provider events and strips diagnostic blobs', () => {
+  const state = { pendingToolCalls: new Set() }
+  assert.deepEqual(sanitizeProviderEvent({ type: 'response.audio.delta', delta: 'AAA=', debug: { secret: true } }, state), { type: 'response.audio.delta', delta: 'AAA=' })
+  assert.equal(sanitizeProviderEvent({ type: 'provider.internal.diagnostic', credentials: 'never' }, state), null)
+  assert.equal(sanitizeProviderEvent({ type: 'response.audio.delta', delta: '../bad' }, state), null)
+  assert.equal(sanitizeProviderEvent({ type: 'response.audio.delta', delta: 'AAAA' }, state), null)
+  assert.deepEqual(sanitizeProviderEvent({ type: 'error', error: { code: 'bad', message: 'safe', request: { headers: 'hidden' } } }, state), { type: 'error', error: { code: 'bad', message: 'safe' } })
+  assert.deepEqual(sanitizeProviderEvent({ type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'submit', arguments: '{}', debug: 'hidden' }, state), { type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'submit', arguments: '{}' })
+  assert.equal(state.pendingToolCalls.has('call-1'), true)
+  assert.equal(sanitizeProviderEvent({ type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'submit', arguments: '{}', replay: true }, state), null)
+})
+
+test('accepts exactly one result for each pending upstream tool call', () => {
+  const state = {
+    id: 'session-id',
+    profileId: 'session-assistant',
+    route: { protocol: 'doubao-realtime-duplex', model: '1.2.6.1' },
+    pendingToolCalls: new Set(['call-1']),
+  }
+  const service = { session() { return { session: { id: 'new-id', tools: [] } } } }
+  const result = safeUpstreamEvent({ type: 'tool.result', call_id: 'call-1', output: 'done' }, state, service)
+  assert.equal(result.items[0].call_id, 'call-1')
+  assert.equal(safeUpstreamEvent({ type: 'response.create' }, state, service).type, 'response.create')
+  assert.throws(() => safeUpstreamEvent({ type: 'tool.result', call_id: 'call-1', output: 'again' }, state, service), /pending/)
+  assert.throws(() => safeUpstreamEvent({ type: 'tool.result', call_id: 'unknown', output: 'no' }, state, service), /pending/)
+})
+
+test('keeps a pending tool call retryable when its result is invalid', () => {
+  const state = {
+    id: 'session-id',
+    profileId: 'session-assistant',
+    route: { protocol: 'doubao-realtime-duplex', model: '1.2.6.1' },
+    pendingToolCalls: new Set(['call-1']),
+  }
+  assert.throws(
+    () => safeUpstreamEvent({ type: 'tool.result', call_id: 'call-1', output: 'x'.repeat(64 * 1024 + 1) }, state, {}),
+    /invalid tool result/,
+  )
+  assert.equal(state.pendingToolCalls.has('call-1'), true)
 })

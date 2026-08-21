@@ -7,9 +7,10 @@
   "exports": {
     ".": "./dsh/index.js",
     "./service": "./dsh/service.js",
+    "./client": "./client/client.js",
     "./package.json": "./package.json"
   },
-  "files": ["dsh", "spec", "cordis.patch.yml", "README.md", "LICENSE"],
+  "files": ["dsh", "client", "spec", "cordis.patch.yml", "plugin-spec.json", "README.md", "LICENSE"],
   "license": "MIT",
   "engines": { "node": ">=20" },
   "dependencies": {
@@ -33,8 +34,8 @@
   },
   "homepage": "https://github.com/AlexKaiqi/dsh-realtime-voice#readme",
   "scripts": {
-    "test": "node --test test/*.test.mjs",
-    "check": "node --check dsh/index.js && node --check dsh/service.js && node --check dsh/transport.js && npm test"
+    "test": "node --test test/*.test.mjs test/*.test.cjs",
+    "check": "node --check dsh/index.js && node --check dsh/service.js && node --check dsh/transport.js && node --check client/client.js && npm test"
   },
   "dsh": {
     "inventory": {
@@ -45,6 +46,10 @@
       "tags": ["voice", "realtime", "speech", "runtime"],
       "dependencies": ["dsh-multi-model-provider"]
     },
-    "bundle": { "patch": "./cordis.patch.yml" }
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
   }
 }

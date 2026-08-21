@@ -1,36 +1,62 @@
 # dsh-realtime-voice
 
-多模型运行时的 Realtime 语音适配层。`dsh-multi-model-provider` 负责模型目录、路由、凭据解析和角色 profile；本插件只注册 GPT Realtime 与豆包 Duplex adapter，并提供浏览器音频传输。
+Provider-neutral Realtime voice transport for DeepSeek Harness. `dsh-multi-model-provider` owns the model catalog, route selection, credential references, and profile registry. Product plugins own role profiles, context shaping, and tool policy. This plugin owns OpenAI Realtime and Doubao Duplex wire protocols plus browser media lifecycle.
 
-业务插件不直接判断 OpenAI/豆包，而是向多模型运行时注册 profile：
+## Host responsibilities
+
+- Registers the unchanged `openai-webrtc` and `doubao-realtime-duplex` adapters.
+- Validates protocol, adapter, provider, scheme, endpoint, and trusted origin before credential resolution.
+- Defaults to official upstream origins: `https://api.openai.com` and `wss://openspeech.bytedance.com`.
+- Allows custom upstream origins only when explicitly listed in `trustedOpenAIOrigins` or `trustedDoubaoOrigins`.
+- Keeps long-lived credentials on the host and sends them only to validated upstreams.
+- Requires browser same-origin `Origin`/`Host`; billable POST routes use explicit marker headers, while the Doubao WebSocket uses the browser-compatible `dsh-realtime-voice-v1` subprotocol. `Sec-Fetch-Site` must be `same-origin` when supplied.
+- Bounds and sanitizes Doubao frames, buffers a small startup event queue, emits `session.ready`, and accepts one result for each pending tool call.
+- Owns every HTTP route, upgrade route, and WebSocket through Cordis lifecycle disposers.
+
+Host endpoints retain their existing paths. When `basePath` is customized for legacy consumers, these default paths remain mounted as stable aliases for the packaged Client:
+
+- `GET /dsh-realtime-voice/models`: public, non-billable model metadata.
+- `POST /dsh-realtime-voice/openai/session`: same-origin OpenAI WebRTC SDP exchange; requires `x-dsh-realtime-voice: 1`.
+- `POST /dsh-realtime-voice/doubao/probe`: same-origin Doubao connection probe; requires `x-dsh-model-probe: 1`.
+- `WS /dsh-realtime-voice/doubao`: same-origin Doubao Duplex proxy; requires WebSocket subprotocol `dsh-realtime-voice-v1`.
+
+## Client service
+
+The packaged web Client publishes the Cordis service `realtimeVoice`:
 
 ```js
-const dispose = ctx.realtimeModelRuntime.registerProfile({
-  id: 'session-assistant',
-  instructions: context => `...${context}`,
-  tools: [/* 仅该角色允许的工具 */],
+const service = ctx.get('realtimeVoice')
+const models = await service.models()
+const session = await service.open({
+  protocol: 'openai-webrtc',
+  routeId: 'openai/gpt-realtime',
+  profileId: 'my-profile',
+  context: 'provider-neutral context',
+})
+const dispose = session.subscribe(event => {
+  // status, phase, transcript, tool, interrupted, error, or closed
 })
 ```
 
-然后按注册路由装配 Provider session：
+Service contract:
 
-```js
-const route = await ctx.realtimeModelRuntime.model(routeId, protocol)
-ctx.realtimeModelRuntime.session({ profileId, route, context })
-```
+- `capabilities()` returns secure-context state, per-protocol browser support, recognition/read-aloud support, and installed browser voices.
+- `models()`
+- `open({ protocol, routeId, profileId, context })`
+- `recognize({ lang, continuous, interim, onTranscript, onError })`
+- `readAloud({ text, voiceName, lang, rate, onEnd, onError })`
 
-本插件负责：
+Realtime handle contract:
 
-- 向 `realtimeModelRuntime` 注册 `openai-webrtc` 与 `doubao-realtime-duplex` adapter。
-- OpenAI Realtime WebRTC 的服务端初始化与长期 Key 隔离。
-- 豆包 Duplex 同源 WebSocket 代理、音频事件白名单和鉴权诊断。
+- `id`
+- `subscribe(listener)`
+- `updateContext(context)`
+- `resolveTool(callId, result, { continueResponse? })`
+- `interrupt()`
+- `close()`
 
-模型发现、选择、凭据解析、上下文裁剪、Profile 与工具白名单均由 `dsh-multi-model-provider` 的 `realtimeModelRuntime` 管理。本插件不解析 Settings schema。
+The Client service owns `RTCPeerConnection`, data channels, microphone tracks, media/audio elements, WebSockets, `AudioContext`, PCM capture and playback, `SpeechRecognition`, `speechSynthesis`, listeners, and late-callback guards. It does not know drafts, Agent submission, or any session-assistant business semantics.
 
-浏览器入口为：
+## Runtime integration
 
-- `GET /dsh-realtime-voice/models`
-- `POST /dsh-realtime-voice/openai/session`
-- `WS /dsh-realtime-voice/doubao`
-
-业务插件必须提交自己注册的 `profileId` 和所选 `routeId`；浏览器不能指定凭据、任意上游事件或未登记的工具。
+Business plugins register profiles with `realtimeModelRuntime` and pass only their profile id, selected route id, and provider-neutral context to `realtimeVoice`. They must resolve normalized `tool` events through the handle; they never supply credentials or arbitrary provider events.

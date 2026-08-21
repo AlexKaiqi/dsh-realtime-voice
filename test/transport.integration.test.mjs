@@ -4,7 +4,7 @@ import { once } from 'node:events'
 import { connect } from 'node:net'
 import test from 'node:test'
 import WebSocket, { WebSocketServer } from 'ws'
-import { registerRealtimeTransport } from '../dsh/transport.js'
+import { REALTIME_WS_PROTOCOL, registerRealtimeTransport } from '../dsh/transport.js'
 
 async function listen(server) {
   server.listen(0, '127.0.0.1')
@@ -19,14 +19,34 @@ async function closeServer(server) {
   await once(server, 'close')
 }
 
+const messageQueues = new WeakMap()
+
 function nextJson(socket, timeout = 2_000) {
-  return Promise.race([
-    once(socket, 'message').then(([data]) => JSON.parse(String(data))),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('timed out waiting for websocket message')), timeout)),
-  ])
+  let queue = messageQueues.get(socket)
+  if (!queue) {
+    queue = { values: [], waiters: [] }
+    messageQueues.set(socket, queue)
+    socket.on('message', data => {
+      const value = JSON.parse(String(data))
+      const waiter = queue.waiters.shift()
+      if (waiter) waiter.resolve(value)
+      else queue.values.push(value)
+    })
+  }
+  if (queue.values.length) return Promise.resolve(queue.values.shift())
+  return new Promise((resolve, reject) => {
+    const waiter = { resolve, reject }
+    queue.waiters.push(waiter)
+    const timer = setTimeout(() => {
+      const index = queue.waiters.indexOf(waiter)
+      if (index >= 0) queue.waiters.splice(index, 1)
+      reject(new Error('timed out waiting for websocket message'))
+    }, timeout)
+    waiter.resolve = value => { clearTimeout(timer); resolve(value) }
+  })
 }
 
-function transportHarness(service) {
+function transportHarness(service, config = {}) {
   const routes = []
   const upgrades = []
   const cleanups = []
@@ -37,7 +57,7 @@ function transportHarness(service) {
     },
     effect(callback) { cleanups.push(callback()) },
   }
-  registerRealtimeTransport(scope, service, { basePath: '/voice' })
+  registerRealtimeTransport(scope, service, { basePath: '/voice', ...config })
   const server = createServer((req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname
     const route = routes.find(candidate => candidate.path === path)
@@ -87,7 +107,7 @@ test('OpenAI transport performs a real local SDP exchange and keeps the API key 
     async model(routeId, protocol) {
       assert.equal(protocol, 'openai-webrtc')
       assert.equal(routeId, 'openai/gpt-realtime')
-      return { id: routeId, model: 'gpt-realtime', baseURL: `${upstreamURL}/v1`, adapter: 'openai-webrtc' }
+      return { id: routeId, model: 'gpt-realtime', provider: 'openai', protocol, baseURL: `${upstreamURL}/v1`, adapter: 'openai-webrtc' }
     },
     async credential() { return { value: 'server-only-secret', credentialRef: 'OPENAI_API_KEY' } },
     session({ profileId, context }) {
@@ -95,12 +115,12 @@ test('OpenAI transport performs a real local SDP exchange and keeps the API key 
       return { type: 'realtime', model: 'gpt-realtime', instructions: context }
     },
   }
-  const harness = transportHarness(service)
+  const harness = transportHarness(service, { trustedOpenAIOrigins: [upstreamURL] })
   const baseURL = await listen(harness.server)
   try {
     const response = await fetch(`${baseURL}/voice/openai/session`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-dsh-realtime-voice': '1' },
+      headers: { 'content-type': 'application/json', origin: baseURL, 'sec-fetch-site': 'same-origin', 'x-dsh-realtime-voice': '1' },
       body: JSON.stringify({
         routeId: 'openai/gpt-realtime',
         profileId: 'session-assistant',
@@ -133,7 +153,7 @@ test('OpenAI transport performs a real local SDP exchange and keeps the API key 
 
     const invalidSdp = await fetch(`${baseURL}/voice/openai/session`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-dsh-realtime-voice': '1' },
+      headers: { 'content-type': 'application/json', origin: baseURL, 'sec-fetch-site': 'same-origin', 'x-dsh-realtime-voice': '1' },
       body: JSON.stringify({ sdp: 'not-sdp' }),
     })
     assert.equal(invalidSdp.status, 400)
@@ -163,11 +183,11 @@ test('Doubao Settings probe uses the realtime-voice route, enforces same-origin,
       modelCalls += 1
       assert.equal(routeId, undefined)
       assert.equal(protocol, 'doubao-realtime-duplex')
-      return { id: 'doubao/ready', model: '1.2.6.1', endpoint: upstreamURL, voice: 'probe-voice' }
+      return { id: 'doubao/ready', model: '1.2.6.1', provider: 'doubao-speech', protocol, adapter: protocol, endpoint: upstreamURL, voice: 'probe-voice' }
     },
     async credential() { return { value: 'probe-secret', credentialRef: 'DOUBAO_API_KEY' } },
   }
-  const harness = transportHarness(service)
+  const harness = transportHarness(service, { trustedDoubaoOrigins: [upstreamURL] })
   const baseURL = await listen(harness.server)
   try {
     const response = await fetch(`${baseURL}/voice/doubao/probe`, {
@@ -224,7 +244,7 @@ test('Doubao transport bridges a real local websocket session, audio, context, t
     async publicModels() { return [{ id: 'doubao/realtime', available: true }] },
     async model(routeId, protocol) {
       assert.equal(protocol, 'doubao-realtime-duplex')
-      return { id: routeId, model: '1.2.6.1', endpoint: upstreamURL, adapter: protocol }
+      return { id: routeId, model: '1.2.6.1', provider: 'doubao-speech', protocol, endpoint: upstreamURL, adapter: protocol }
     },
     async credential() { return { value: 'doubao-server-secret', credentialRef: 'DOUBAO_API_KEY' } },
     session({ profileId, route, context }) {
@@ -241,11 +261,11 @@ test('Doubao transport bridges a real local websocket session, audio, context, t
       return built
     },
   }
-  const harness = transportHarness(service)
+  const harness = transportHarness(service, { trustedDoubaoOrigins: [upstreamURL] })
   const baseURL = await listen(harness.server)
   const wsURL = baseURL.replace(/^http/, 'ws')
-  const browser = new WebSocket(`${wsURL}/voice/doubao`, {
-    headers: { origin: baseURL },
+  const browser = new WebSocket(`${wsURL}/voice/doubao`, REALTIME_WS_PROTOCOL, {
+    headers: { origin: baseURL, 'sec-fetch-site': 'same-origin' },
   })
   try {
     await once(browser, 'open')
@@ -260,26 +280,31 @@ test('Doubao transport bridges a real local websocket session, audio, context, t
     const create = await nextJson(upstreamSocket)
     assert.equal(create.type, 'session.create')
     assert.equal(create.session.instructions, 'session-assistant:initial draft')
+    browser.send(JSON.stringify({ type: 'context.update', context: 'updated draft' }))
     upstreamSocket.send(JSON.stringify({ type: 'session.created', session: { id: 'upstream-session' } }))
     assert.equal((await nextJson(browser)).session.id, 'upstream-session')
+    assert.equal((await nextJson(browser)).type, 'session.ready')
 
-    browser.send(JSON.stringify({ type: 'context.update', context: 'updated draft' }))
     const update = await nextJson(upstreamSocket)
     assert.equal(update.type, 'session.update')
     assert.equal(update.session.id, 'upstream-session')
     assert.equal(update.session.instructions, 'session-assistant:updated draft')
 
-    browser.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: Buffer.from('pcm').toString('base64') }))
+    browser.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: Buffer.from('pcm!').toString('base64') }))
     assert.equal((await nextJson(upstreamSocket)).type, 'input_audio_buffer.append')
+    upstreamSocket.send(JSON.stringify({ type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'submit_to_agent', arguments: '{}' }))
+    assert.equal((await nextJson(browser)).call_id, 'call-1')
     browser.send(JSON.stringify({ type: 'tool.result', call_id: 'call-1', output: 'draft submitted' }))
     const tool = await nextJson(upstreamSocket)
     assert.equal(tool.type, 'conversation.item.create')
     assert.equal(tool.items[0].call_id, 'call-1')
+    browser.send(JSON.stringify({ type: 'response.create' }))
+    assert.equal((await nextJson(upstreamSocket)).type, 'response.create')
     browser.send(JSON.stringify({ type: 'response.cancel' }))
     assert.equal((await nextJson(upstreamSocket)).type, 'response.cancel')
 
-    upstreamSocket.send(JSON.stringify({ type: 'response.audio.delta', delta: 'AAAA' }))
-    assert.deepEqual(await nextJson(browser), { type: 'response.audio.delta', delta: 'AAAA' })
+    upstreamSocket.send(JSON.stringify({ type: 'response.audio.delta', delta: 'AAA=' }))
+    assert.deepEqual(await nextJson(browser), { type: 'response.audio.delta', delta: 'AAA=' })
   } finally {
     if (browser.readyState !== WebSocket.CLOSED) {
       const closed = once(browser, 'close')
@@ -313,6 +338,7 @@ test('Doubao websocket rejects cross-origin browser upgrades before contacting u
       'Upgrade: websocket',
       'Sec-WebSocket-Version: 13',
       'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+      `Sec-WebSocket-Protocol: ${REALTIME_WS_PROTOCOL}`,
       '',
       '',
     ].join('\r\n'))

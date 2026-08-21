@@ -16,15 +16,18 @@
   "tests": {
     "contractTests": [
       { "file": "test/service.test.mjs", "references": ["openAIRealtimeAdapter", "doubaoRealtimeAdapter", "realtimeVoiceAdapters"] },
-      { "file": "test/transport.test.mjs", "references": ["callsUrl", "isSameOriginUpgrade", "safeUpstreamEvent"] }
+      { "file": "test/transport.test.mjs", "references": ["validateProviderRoute", "authorizeBrowserRequest", "createStartupQueue", "sanitizeProviderEvent", "safeUpstreamEvent"] },
+      { "file": "test/client.test.cjs", "references": ["realtimeVoice", "normalizeProviderEvent", "RealtimeHandle"] }
     ],
     "runtimeTests": [
       { "file": "test/assembly.test.mjs", "layer": "L1" },
       { "file": "test/service.test.mjs", "layer": "L2" },
-      { "file": "test/transport.test.mjs", "layer": "L2" }
+      { "file": "test/transport.test.mjs", "layer": "L2" },
+      { "file": "test/transport.integration.test.mjs", "layer": "L2" },
+      { "file": "test/client.test.cjs", "layer": "L2" }
     ]
   },
   "contracts": [
-    { "name": "realtime-voice-adapters", "file": "spec/runtime-contract.json", "versionField": "version" }
+    { "name": "realtime-voice-provider-transport", "file": "spec/runtime-contract.json", "versionField": "version" }
   ]
 }

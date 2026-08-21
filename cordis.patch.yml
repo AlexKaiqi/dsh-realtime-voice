@@ -4,3 +4,7 @@
       config:
         enabled: true
         basePath: '/dsh-realtime-voice'
+        trustedOpenAIOrigins:
+          - 'https://api.openai.com'
+        trustedDoubaoOrigins:
+          - 'wss://openspeech.bytedance.com'
