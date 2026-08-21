@@ -148,15 +148,17 @@
     var handle = service.track(new RealtimeHandle('openai-webrtc'))
     handle.emit({ type: 'phase', phase: 'connecting' })
     try {
-      var stream = await service.root.navigator.mediaDevices.getUserMedia({ audio: true })
-      if (handle.closed) { stream.getTracks().forEach(function (track) { track.stop() }); return handle }
-      handle.own(function () { stream.getTracks().forEach(function (track) { track.stop() }) })
+      var outputOnly = options.outputOnly === true
+      var stream = outputOnly ? null : await service.root.navigator.mediaDevices.getUserMedia({ audio: true })
+      if (handle.closed) { if (stream) stream.getTracks().forEach(function (track) { track.stop() }); return handle }
+      if (stream) handle.own(function () { stream.getTracks().forEach(function (track) { track.stop() }) })
       var peer = new service.root.RTCPeerConnection()
       handle.own(function () { peer.close() })
       var audio = service.root.document.createElement('audio')
       audio.autoplay = true
       handle.own(function () { audio.pause(); audio.srcObject = null; audio.remove() })
-      stream.getTracks().forEach(function (track) { peer.addTrack(track, stream) })
+      if (stream) stream.getTracks().forEach(function (track) { peer.addTrack(track, stream) })
+      else if (typeof peer.addTransceiver === 'function') peer.addTransceiver('audio', { direction: 'recvonly' })
       handle.cancelPlayback = function () { audio.pause(); audio.srcObject = null }
       handle.resumePlayback = function () {
         if (!handle.remoteStream || handle.closed) return
@@ -177,7 +179,14 @@
         if (event.type === 'response.create') return jsonSend(channel, { type: 'response.create' })
         return jsonSend(channel, event)
       }
-      channel.onopen = handle.guard(function () { handle.emit({ type: 'status', connected: true, status: 'ready' }); handle.emit({ type: 'phase', phase: 'listening' }) })
+      channel.onopen = handle.guard(function () {
+        handle.emit({ type: 'status', connected: true, status: 'ready' })
+        handle.emit({ type: 'phase', phase: options.previewText ? 'thinking' : 'listening' })
+        if (options.previewText) {
+          jsonSend(channel, { type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: text(options.previewText) }] } })
+          jsonSend(channel, { type: 'response.create' })
+        }
+      })
       channel.onmessage = handle.guard(function (message) { try { openAIEvent(handle, JSON.parse(message.data)) } catch (_) {} })
       channel.onerror = handle.guard(function () { handle.emit(errorEvent('data_channel_error', 'OpenAI Realtime data channel failed', true)) })
       var offer = await peer.createOffer()
@@ -247,8 +256,9 @@
     var handle = service.track(new RealtimeHandle('doubao-realtime-duplex'))
     handle.emit({ type: 'phase', phase: 'connecting' })
     try {
-      var stream = await service.root.navigator.mediaDevices.getUserMedia({ audio: true })
-      handle.own(function () { stream.getTracks().forEach(function (track) { track.stop() }) })
+      var outputOnly = options.outputOnly === true
+      var stream = outputOnly ? null : await service.root.navigator.mediaDevices.getUserMedia({ audio: true })
+      if (stream) handle.own(function () { stream.getTracks().forEach(function (track) { track.stop() }) })
       var AudioContext = service.root.AudioContext || service.root.webkitAudioContext
       if (!AudioContext) throw new Error('AudioContext is not available')
       var context = new AudioContext()
@@ -273,7 +283,8 @@
         try { event = JSON.parse(message.data) } catch (_) { return }
         if (event.type === 'session.ready') {
           handle.emit({ type: 'status', connected: true, status: 'ready' })
-          handle.emit({ type: 'phase', phase: 'listening' })
+          handle.emit({ type: 'phase', phase: options.previewText ? 'thinking' : 'listening' })
+          if (options.previewText) jsonSend(socket, { type: 'preview.speak', text: text(options.previewText) })
         }
         if (event.type === 'response.audio.delta' || event.type === 'response.output_audio.delta') schedulePCM(service, handle, text(event.delta))
         var normalized = normalizeProviderEvent('doubao-realtime-duplex', event)
@@ -281,16 +292,18 @@
       })
       socket.onerror = handle.guard(function () { handle.emit(errorEvent('websocket_error', 'Doubao Realtime WebSocket failed', true)) })
       socket.onclose = handle.guard(function () { handle.close() })
-      var input = context.createMediaStreamSource(stream)
-      var processor = context.createScriptProcessor(4096, 1, 1)
-      input.connect(processor)
-      processor.connect(context.destination)
-      processor.onaudioprocess = handle.guard(function (event) {
-        if (socket.readyState !== 1) return
-        var pcm = downsamplePCM(event.inputBuffer.getChannelData(0), context.sampleRate, 16000)
-        jsonSend(socket, { type: 'input_audio_buffer.append', audio: bytesToBase64(service.root, new Uint8Array(pcm.buffer)) })
-      })
-      handle.own(function () { processor.disconnect(); input.disconnect(); processor.onaudioprocess = null })
+      if (stream) {
+        var input = context.createMediaStreamSource(stream)
+        var processor = context.createScriptProcessor(4096, 1, 1)
+        input.connect(processor)
+        processor.connect(context.destination)
+        processor.onaudioprocess = handle.guard(function (event) {
+          if (socket.readyState !== 1) return
+          var pcm = downsamplePCM(event.inputBuffer.getChannelData(0), context.sampleRate, 16000)
+          jsonSend(socket, { type: 'input_audio_buffer.append', audio: bytesToBase64(service.root, new Uint8Array(pcm.buffer)) })
+        })
+        handle.own(function () { processor.disconnect(); input.disconnect(); processor.onaudioprocess = null })
+      }
       return handle
     } catch (error) {
       handle.close()

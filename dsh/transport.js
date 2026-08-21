@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import WebSocket, { WebSocketServer } from 'ws'
+import { DOUBAO_PREVIEW_PROMPT_PCM_BASE64 } from './preview-audio.js'
 
 export const OPENAI_API_ORIGIN = 'https://api.openai.com'
 export const DOUBAO_DUPLEX_ORIGIN = 'wss://openspeech.bytedance.com'
@@ -277,6 +278,17 @@ export function safeUpstreamEvent(message, state, service) {
     case 'response.cancel':
     case 'response.create':
       return { type: message.type, event_id: randomUUID() }
+    case 'preview.speak': {
+      const preview = string(message.text, 500)
+      if (!preview) throw new Error('voice preview text is required')
+      const pcm = Buffer.from(DOUBAO_PREVIEW_PROMPT_PCM_BASE64, 'base64')
+      const events = []
+      for (let offset = 0; offset < pcm.length; offset += 3200) {
+        events.push({ type: 'input_audio_buffer.append', event_id: randomUUID(), audio: pcm.subarray(offset, offset + 3200).toString('base64') })
+      }
+      events.push({ type: 'input_audio_buffer.commit', event_id: randomUUID() })
+      return events
+    }
     case 'tool.result': {
       const callID = String(message.call_id || '')
       if (!state.pendingToolCalls?.has(callID)) throw new Error('tool result does not match a pending call')
@@ -396,7 +408,11 @@ function registerDoubaoUpgrade(scope, service, path, policy) {
         }
         const sendUpstream = message => {
           if (!upstream || upstream.readyState !== WebSocket.OPEN) throw new Error('Doubao Realtime upstream is not connected')
-          upstream.send(JSON.stringify(safeUpstreamEvent(message, state, service)))
+          const outgoing = safeUpstreamEvent(message, state, service)
+          if (!Array.isArray(outgoing)) return upstream.send(JSON.stringify(outgoing))
+          outgoing.forEach((event, index) => setTimeout(() => {
+            if (upstream?.readyState === WebSocket.OPEN) upstream.send(JSON.stringify(event))
+          }, index * 100))
         }
         const begin = async message => {
           starting = true

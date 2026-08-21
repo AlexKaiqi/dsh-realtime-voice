@@ -95,6 +95,18 @@ test('accepts exactly one result for each pending upstream tool call', () => {
   assert.throws(() => safeUpstreamEvent({ type: 'tool.result', call_id: 'unknown', output: 'no' }, state, service), /pending/)
 })
 
+test('maps a provider-neutral preview to a fixed microphone-free Doubao audio turn', () => {
+  const events = safeUpstreamEvent({ type: 'preview.speak', text: '你好，我是试听声音。' }, { pendingToolCalls: new Set() }, {})
+  assert.equal(events.length, 21)
+  assert.equal(events.at(-1).type, 'input_audio_buffer.commit')
+  const chunks = events.slice(0, -1)
+  assert.equal(chunks.every(event => event.type === 'input_audio_buffer.append'), true)
+  assert.equal(chunks.every(event => /^[A-Za-z0-9+/]+={0,2}$/.test(event.audio)), true)
+  assert.equal(chunks.reduce((total, event) => total + Buffer.from(event.audio, 'base64').length, 0), 63894)
+  assert.throws(() => safeUpstreamEvent({ type: 'preview.speak', text: '' }, { pendingToolCalls: new Set() }, {}), /required/)
+  assert.equal(safeUpstreamEvent({ type: 'preview.speak', text: 'x'.repeat(501) }, { pendingToolCalls: new Set() }, {}).at(-1).type, 'input_audio_buffer.commit')
+})
+
 test('keeps a pending tool call retryable when its result is invalid', () => {
   const state = {
     id: 'session-id',

@@ -142,6 +142,39 @@ test('OpenAI startup replays readiness, interrupts playback, and cleans resource
   assert.equal(audio.removed, true)
 })
 
+test('output-only OpenAI preview sends one text turn without microphone access', async () => {
+  const sent = []
+  const channel = { readyState: 1, send(value) { sent.push(JSON.parse(value)) }, close() {} }
+  let transceiver
+  class Peer {
+    addTransceiver(kind, options) { transceiver = { kind, options } }
+    createDataChannel() { return channel }
+    async createOffer() { return { sdp: 'v=0' } }
+    async setLocalDescription() {}
+    async setRemoteDescription() { channel.onopen() }
+    close() {}
+  }
+  const service = Object.create(RealtimeVoiceService.prototype)
+  service.root = {
+    navigator: { mediaDevices: { getUserMedia: async () => { throw new Error('microphone must not be requested') } } },
+    RTCPeerConnection: Peer,
+    document: { createElement: () => ({ pause() {}, play() { return Promise.resolve() }, remove() {} }) },
+    fetch: async () => ({ ok: true, text: async () => 'v=0' }),
+  }
+  service.basePath = '/dsh-realtime-voice'
+  service.handles = new Set()
+  const handle = await service.open({ protocol: 'openai-webrtc', outputOnly: true, previewText: 'Hello preview' })
+  const events = []
+  handle.subscribe(event => events.push(event))
+  assert.deepEqual(transceiver, { kind: 'audio', options: { direction: 'recvonly' } })
+  assert.deepEqual(sent, [
+    { type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Hello preview' }] } },
+    { type: 'response.create' },
+  ])
+  assert.deepEqual(events.map(event => event.phase || event.status), ['connecting', 'ready', 'thinking'])
+  handle.close()
+})
+
 test('OpenAI startup failure closes already allocated browser resources', async () => {
   const track = { stop() { this.stopped = true } }
   const channel = { readyState: 1, send() {}, close() { this.closed = true } }

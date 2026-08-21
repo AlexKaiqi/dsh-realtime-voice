@@ -46,6 +46,8 @@ Service contract:
 - `recognize({ lang, continuous, interim, onTranscript, onError })`
 - `readAloud({ text, voiceName, lang, rate, onEnd, onError })`
 
+For a settings-page voice preview, `open()` also accepts `outputOnly: true` and a bounded `previewText`. This establishes a receive-only session and never opens the microphone. OpenAI receives a one-turn text request. The deployed Doubao Dialogue dialect does not accept that text event, so the Host streams a short bundled 16 kHz PCM prompt at realtime cadence and commits it; the selected model then answers with its actual configured voice. The caller must subscribe immediately and close the handle after the response completes, fails, or times out.
+
 Realtime handle contract:
 
 - `id`
