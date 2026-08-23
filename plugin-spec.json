@@ -1,6 +1,6 @@
 {
-  "specVersion": "0.2.0",
-  "name": "dsh-realtime-voice",
+  "specVersion": "0.3.0",
+  "name": "dsh-voice-agent",
   "pluginTypes": [
     "F3"
   ],
@@ -24,7 +24,7 @@
         "references": [
           "openAIRealtimeAdapter",
           "doubaoRealtimeAdapter",
-          "realtimeVoiceAdapters"
+          "voiceAgentAdapters"
         ]
       },
       {
@@ -40,10 +40,11 @@
       {
         "file": "test/client.test.cjs",
         "references": [
-          "realtimeVoice",
+          "voiceAgent",
           "normalizeProviderEvent",
-          "RealtimeHandle",
-          "registerTools"
+          "VoiceConversation",
+          "startConversation",
+          "registerActions"
         ]
       }
     ],
@@ -72,7 +73,7 @@
   },
   "contracts": [
     {
-      "name": "realtime-voice-provider-runtime",
+      "name": "duplex-voice-agent",
       "file": "spec/runtime-contract.json",
       "versionField": "version"
     }

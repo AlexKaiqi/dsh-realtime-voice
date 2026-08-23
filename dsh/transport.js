@@ -6,10 +6,13 @@ import { DOUBAO_PREVIEW_PROMPT_PCM_BASE64 } from './preview-audio.js'
 export const OPENAI_API_ORIGIN = 'https://api.openai.com'
 export const DOUBAO_DUPLEX_ORIGIN = 'wss://openspeech.bytedance.com'
 export const DOUBAO_DUPLEX_ENDPOINT = `${DOUBAO_DUPLEX_ORIGIN}/api/v3/duplex/realtime/dialogue`
-export const REALTIME_MARKER_HEADER = 'x-dsh-realtime-voice'
-export const REALTIME_WS_PROTOCOL = 'dsh-realtime-voice-v1'
+export const REALTIME_MARKER_HEADER = 'x-dsh-voice-agent'
+export const REALTIME_WS_PROTOCOL = 'dsh-voice-agent-v1'
+export const LEGACY_REALTIME_MARKER_HEADER = 'x-dsh-realtime-voice'
+export const LEGACY_REALTIME_WS_PROTOCOL = 'dsh-realtime-voice-v1'
 export const MODEL_PROBE_HEADER = 'x-dsh-model-probe'
-export const DEFAULT_BASE_PATH = '/dsh-realtime-voice'
+export const DEFAULT_BASE_PATH = '/dsh-voice-agent'
+export const LEGACY_BASE_PATH = '/dsh-realtime-voice'
 export const MAX_STARTUP_EVENTS = 16
 export const MAX_PROVIDER_FRAME_BYTES = 512 * 1024
 const MAX_BODY_BYTES = 256 * 1024
@@ -22,7 +25,7 @@ function object(value) {
 
 /** Host-side event-flow trace for the Realtime bridge; lands in the process log (web-nohup.log). */
 function trace(...args) {
-  try { console.log('[realtime-voice:host]', ...args) } catch { /* never break the bridge */ }
+  try { console.log('[voice-agent:host]', ...args) } catch { /* never break the bridge */ }
 }
 
 function string(value, max = MAX_TEXT_CHARS) {
@@ -115,6 +118,8 @@ export function callsUrl(baseURL = `${OPENAI_API_ORIGIN}/v1`) {
 }
 
 function safetyIdentifier(profileId) {
+  // Keep the historical seed so a package rename does not rotate the stable,
+  // privacy-preserving safety identifier for the same local user/profile.
   return createHash('sha256').update(`dsh-realtime-voice:${profileId}:${homedir()}`).digest('hex')
 }
 
@@ -133,7 +138,9 @@ export function isSameOriginRequest(req) {
 export const isSameOriginUpgrade = isSameOriginRequest
 
 export function authorizeBrowserRequest(req, marker = REALTIME_MARKER_HEADER) {
-  if (req.headers?.[marker] !== '1') return { ok: false, error: 'missing Realtime voice request marker' }
+  const marked = req.headers?.[marker] === '1'
+    || (marker === REALTIME_MARKER_HEADER && req.headers?.[LEGACY_REALTIME_MARKER_HEADER] === '1')
+  if (!marked) return { ok: false, error: 'missing voice Agent request marker' }
   const fetchSite = req.headers?.['sec-fetch-site']
   if (typeof fetchSite === 'string' && fetchSite !== 'same-origin') return { ok: false, error: 'Realtime voice request must be same-origin' }
   return isSameOriginRequest(req)
@@ -146,7 +153,7 @@ export function authorizeWebSocketRequest(req) {
   const protocols = String(req.headers?.['sec-websocket-protocol'] || '')
     .split(',')
     .map(value => value.trim())
-  if (!protocols.includes(REALTIME_WS_PROTOCOL)) return { ok: false, error: 'missing Realtime voice websocket protocol' }
+  if (!protocols.includes(REALTIME_WS_PROTOCOL) && !protocols.includes(LEGACY_REALTIME_WS_PROTOCOL)) return { ok: false, error: 'missing voice Agent websocket protocol' }
   const fetchSite = req.headers?.['sec-fetch-site']
   if (typeof fetchSite === 'string' && fetchSite !== 'same-origin') return { ok: false, error: 'Realtime voice websocket must be same-origin' }
   return isSameOriginRequest(req)
@@ -533,13 +540,13 @@ function registerDoubaoUpgrade(scope, service, path, policy) {
         browser.on('error', () => closeBoth(1011, 'browser websocket error'))
       })
     },
-  }), 'dsh-realtime-voice.doubao-upgrade')
+  }), 'dsh-voice-agent.doubao-upgrade')
 
   if (typeof scope.effect !== 'function') throw new Error('Doubao websocket server requires scope.effect lifecycle ownership')
   scope.effect(() => () => {
     for (const socket of acceptor.clients) socket.terminate()
     acceptor.close()
-  }, 'dsh-realtime-voice.doubao-sockets')
+  }, 'dsh-voice-agent.doubao-sockets')
 }
 
 function registerOpenAISession(scope, service, path, policy) {
@@ -584,7 +591,7 @@ function registerOpenAISession(scope, service, path, policy) {
         sendJson(res, 502, { ok: false, error: message })
       }
     },
-  }), 'dsh-realtime-voice.openai-session')
+  }), 'dsh-voice-agent.openai-session')
 }
 
 function registerModelsRoute(scope, service, path) {
@@ -600,7 +607,7 @@ function registerModelsRoute(scope, service, path) {
         sendJson(res, 500, { models: [], error: String(error?.message || error) })
       }
     },
-  }), 'dsh-realtime-voice.models')
+  }), 'dsh-voice-agent.models')
 }
 
 function registerDoubaoProbe(scope, service, path, policy) {
@@ -625,15 +632,15 @@ function registerDoubaoProbe(scope, service, path, policy) {
         sendJson(res, 502, { ok: false, error: String(error?.message || error) })
       }
     },
-  }), 'dsh-realtime-voice.doubao-probe')
+  }), 'dsh-voice-agent.doubao-probe')
 }
 
 export function registerRealtimeTransport(scope, service, config = {}) {
   const configuredPath = String(config.basePath || DEFAULT_BASE_PATH).replace(/\/+$/, '')
   const policy = transportPolicy(config)
-  // The packaged Client has no Host composition config channel, so the default
-  // path remains a stable alias when a legacy custom basePath is also mounted.
-  for (const basePath of new Set([DEFAULT_BASE_PATH, configuredPath])) {
+  // The packaged Client has no Host composition config channel, so the new
+  // default and the old package path remain mounted during the rename window.
+  for (const basePath of new Set([DEFAULT_BASE_PATH, LEGACY_BASE_PATH, configuredPath])) {
     registerModelsRoute(scope, service, `${basePath}/models`)
     registerOpenAISession(scope, service, `${basePath}/openai/session`, policy)
     registerDoubaoProbe(scope, service, `${basePath}/doubao/probe`, policy)

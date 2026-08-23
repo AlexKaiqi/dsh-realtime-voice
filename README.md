@@ -1,6 +1,21 @@
-# dsh-realtime-voice
+# dsh-voice-agent
 
-Provider-neutral Realtime voice runtime for DeepSeek Harness. `dsh-multi-model-provider` owns the model catalog, route selection, credential references, and profile registry. Product plugins own role profiles, context shaping, and tool policy. This plugin owns the OpenAI Realtime and Doubao Duplex wire protocols, the browser media lifecycle, and the neutral session runtime: the tool-execution loop with async results (dual output) that product layers parameterize.
+Provider-neutral full-duplex voice Agent capability for DeepSeek Harness.
+
+The public product abstraction is deliberately small: a consumer starts a **voice conversation with an Agent**, observes the conversation, lets the user interrupt naturally, supplies product-owned actions, and ends the conversation. Provider sessions, wire events, audio buffers, VAD, WebRTC, WebSocket, STT, LLM, and TTS are implementation details behind that boundary.
+
+`dsh-multi-model-provider` owns model routes, credential references, and provider profiles. Product plugins own Agent identity, context, durable history, action policy, and authorization. This plugin owns only the live voice conversation: simultaneous listening and speaking, interruption, browser media lifetime, provider adaptation, normalized conversation events, and the neutral action-execution loop.
+
+## Product boundary
+
+```text
+Agent (owned by the product)
+└── Voice conversation (owned here)
+    ├── start / observe / interrupt / end
+    └── action requests delegated back to the product
+```
+
+The plugin does not create a second Agent, own long-term memory, or decide whether an action is authorized. A Realtime provider session is strictly internal and must not become the consumer-facing object.
 
 ## Host responsibilities
 
@@ -9,61 +24,57 @@ Provider-neutral Realtime voice runtime for DeepSeek Harness. `dsh-multi-model-p
 - Defaults to official upstream origins: `https://api.openai.com` and `wss://openspeech.bytedance.com`.
 - Allows custom upstream origins only when explicitly listed in `trustedOpenAIOrigins` or `trustedDoubaoOrigins`.
 - Keeps long-lived credentials on the host and sends them only to validated upstreams.
-- Requires browser same-origin `Origin`/`Host`; billable POST routes use explicit marker headers, while the Doubao WebSocket uses the browser-compatible `dsh-realtime-voice-v1` subprotocol. `Sec-Fetch-Site` must be `same-origin` when supplied.
+- Requires browser same-origin `Origin`/`Host`; billable POST routes use explicit marker headers, while the Doubao WebSocket uses the browser-compatible `dsh-voice-agent-v1` subprotocol. `Sec-Fetch-Site` must be `same-origin` when supplied.
 - Bounds and sanitizes Doubao frames, buffers a small startup event queue, emits `session.ready`, and accepts one result for each pending tool call.
 - Owns every HTTP route, upgrade route, and WebSocket through Cordis lifecycle disposers.
 
-Host endpoints retain their existing paths. When `basePath` is customized for legacy consumers, these default paths remain mounted as stable aliases for the packaged Client:
+Host endpoints use the new product name. The old `/dsh-realtime-voice` paths, marker, and WebSocket subprotocol remain temporary compatibility aliases:
 
-- `GET /dsh-realtime-voice/models`: public, non-billable model metadata.
-- `POST /dsh-realtime-voice/openai/session`: same-origin OpenAI WebRTC SDP exchange; requires `x-dsh-realtime-voice: 1`.
-- `POST /dsh-realtime-voice/doubao/probe`: same-origin Doubao connection probe; requires `x-dsh-model-probe: 1`.
-- `WS /dsh-realtime-voice/doubao`: same-origin Doubao Duplex proxy; requires WebSocket subprotocol `dsh-realtime-voice-v1`.
+- `GET /dsh-voice-agent/models`: public, non-billable model metadata.
+- `POST /dsh-voice-agent/openai/session`: same-origin OpenAI WebRTC SDP exchange; requires `x-dsh-voice-agent: 1`.
+- `POST /dsh-voice-agent/doubao/probe`: same-origin Doubao connection probe; requires `x-dsh-model-probe: 1`.
+- `WS /dsh-voice-agent/doubao`: same-origin Doubao Duplex proxy; requires WebSocket subprotocol `dsh-voice-agent-v1`.
 
 ## Client service
 
-The packaged web Client publishes the Cordis service `realtimeVoice`:
+The packaged web Client publishes the Cordis service `voiceAgent`:
 
 ```js
-const service = ctx.get('realtimeVoice')
-const models = await service.models()
-const session = await service.open({
-  protocol: 'openai-webrtc',
+const service = ctx.get('voiceAgent')
+const conversation = await service.startConversation({
   routeId: 'openai/gpt-realtime',
   profileId: 'my-profile',
   context: 'provider-neutral context',
+  ownerId: 'my-product:active',
 })
-const dispose = session.subscribe(event => {
-  // status, phase, transcript, tool, interrupted, error, or closed
+const dispose = conversation.subscribe(event => {
+  // connection/activity, transcript, action, interruption, error, or end
 })
 ```
 
-Service contract:
+Primary service contract:
 
-- `capabilities()` returns secure-context state, per-protocol browser support, recognition/read-aloud support, the current exclusive audio-input lease state, and installed browser voices.
-- `models()`
-- `open({ protocol, routeId, profileId, context, ownerId })`
-- `registerTools(ownerPrefix, tools)` registers tool executors for one audio-input owner prefix and returns `{ dispose() }`. Handles whose `ownerId` starts with the prefix resolve their tool events through these executors automatically; the model keeps speaking while an async result is pending (dual output). The executor may return a plain value, a Promise, or call `control.resolve(result, options)` itself when it must settle the result before running follow-up work. Async executors that never settle are resolved with a timeout error (`tool.timeoutMs` per tool, default 5 minutes) so the model is never left waiting forever. Every automatic resolution emits a normalized `tool-result` event whose `ok` means the result was delivered (the executor outcome is in `output`). Consumers without a matching registry keep resolving tool events themselves (legacy behavior).
-- `recognize({ lang, continuous, interim, ownerId, onTranscript, onError })`
-- `readAloud({ text, voiceName, lang, rate, onEnd, onError })`
+- `capabilities()` reports whether a duplex conversation can start and whether audio input is already owned.
+- `startConversation({ routeId, profileId, context, ownerId })` returns a `VoiceConversation`. The provider protocol is inferred from the selected route; callers do not need to model OpenAI or Doubao sessions.
+- `registerActions(ownerPrefix, actions)` connects model-requested actions to product-owned executors. The product remains responsible for authorization and side-effect policy.
 
-For a settings-page voice preview, `open()` also accepts `outputOnly: true` and a bounded `previewText`. This establishes a receive-only session and never opens the microphone. OpenAI receives a one-turn text request. The deployed Doubao Dialogue dialect does not accept that text event, so the Host streams a short bundled 16 kHz PCM prompt at realtime cadence and commits it; the selected model then answers with its actual configured voice. The caller must subscribe immediately and close the handle after the response completes, fails, or times out.
+During the 0.3 migration, `open`, `registerTools`, `resolveTool`, `close`, `models`, `recognize`, and `readAloud` remain compatibility APIs. New product code should use the conversation vocabulary above.
 
-Realtime handle contract:
+`VoiceConversation` contract:
 
 - `id`
 - `subscribe(listener)`
 - `updateContext(context)`
-- `resolveTool(callId, result, { continueResponse? })`
+- `resolveAction(callId, result, { continueResponse? })`
 - `interrupt()`
-- `close()`
+- `end()`
 
 The Client service owns `RTCPeerConnection`, data channels, microphone tracks, media/audio elements, WebSockets, `AudioContext`, PCM capture and playback, `SpeechRecognition`, `speechSynthesis`, listeners, late-callback guards, and the neutral tool-execution loop. It does not know drafts, Agent submission, knowledge bases, pets, or any product business semantics.
 
-Every microphone or browser-recognition consumer supplies a bounded `ownerId`. Audio input is an exclusive lease: a competing `open()` or `recognize()` fails with `code: "audio_input_busy"` and the current owner id. A low-priority standby recognizer may set `preemptible: true`; an active assistant then closes that recognizer before claiming the lease. Closing a handle or failing during startup releases the lease. Receive-only preview and speech synthesis never acquire it.
+Every microphone consumer supplies a bounded `ownerId`. Audio input is an exclusive lease: a competing conversation fails with `code: "audio_input_busy"` and the current owner id. Ending a conversation or failing during startup releases the lease.
 
 Browser media failures are normalized to stable, consumer-localizable codes on the rejected error (and on `recognize()` error events): `mic_not_found` (no input device), `mic_permission_denied`, `mic_unreadable`, and `mic_aborted`. The raw DOMException message is replaced with one canonical English sentence per code; consumers translate `error.code` into their own language and fall back to the message for unknown codes.
 
 ## Runtime integration
 
-Business plugins register profiles with `realtimeModelRuntime` and pass only their profile id, selected route id, and provider-neutral context to `realtimeVoice`. They register tool executors with `registerTools` under their audio-input owner prefix; the runtime executes and settles tool events (dual output: speech continues while async results are pending). They never supply credentials or arbitrary provider events, and the runtime never sees tasks, drafts, or submission policy.
+Business plugins register profiles with `realtimeModelRuntime`, then pass only the selected route, profile, Agent context, and owner identity to `voiceAgent.startConversation`. They register product actions under the same owner prefix. They never supply credentials or provider events, and this plugin never sees drafts, knowledge policy, submission policy, or delegation authorization.

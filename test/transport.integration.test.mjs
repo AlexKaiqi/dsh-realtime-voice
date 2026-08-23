@@ -120,7 +120,7 @@ test('OpenAI transport performs a real local SDP exchange and keeps the API key 
   try {
     const response = await fetch(`${baseURL}/voice/openai/session`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', origin: baseURL, 'sec-fetch-site': 'same-origin', 'x-dsh-realtime-voice': '1' },
+      headers: { 'content-type': 'application/json', origin: baseURL, 'sec-fetch-site': 'same-origin', 'x-dsh-voice-agent': '1' },
       body: JSON.stringify({
         routeId: 'openai/gpt-realtime',
         profileId: 'session-assistant',
@@ -153,7 +153,7 @@ test('OpenAI transport performs a real local SDP exchange and keeps the API key 
 
     const invalidSdp = await fetch(`${baseURL}/voice/openai/session`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', origin: baseURL, 'sec-fetch-site': 'same-origin', 'x-dsh-realtime-voice': '1' },
+      headers: { 'content-type': 'application/json', origin: baseURL, 'sec-fetch-site': 'same-origin', 'x-dsh-voice-agent': '1' },
       body: JSON.stringify({ sdp: 'not-sdp' }),
     })
     assert.equal(invalidSdp.status, 400)
@@ -163,7 +163,7 @@ test('OpenAI transport performs a real local SDP exchange and keeps the API key 
   }
 })
 
-test('Doubao Settings probe uses the realtime-voice route, enforces same-origin, and completes a minimal upstream session', async () => {
+test('Doubao Settings probe uses the voice-agent route, enforces same-origin, and completes a minimal upstream session', async () => {
   const upstreamHTTP = createServer()
   const upstreamWSS = new WebSocketServer({ server: upstreamHTTP })
   const upstreamURL = (await listen(upstreamHTTP)).replace(/^http/, 'ws')

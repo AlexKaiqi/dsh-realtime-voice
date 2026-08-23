@@ -1,7 +1,7 @@
 {
-  "name": "dsh-realtime-voice",
-  "version": "0.2.0",
-  "description": "Provider-neutral registered Realtime voice runtime for DeepSeek Harness assistants.",
+  "name": "dsh-voice-agent",
+  "version": "0.3.0",
+  "description": "Provider-neutral full-duplex voice Agent capability for DeepSeek Harness.",
   "type": "module",
   "main": "./dsh/index.js",
   "exports": {
@@ -27,12 +27,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AlexKaiqi/dsh-realtime-voice.git"
+    "url": "git+https://github.com/AlexKaiqi/dsh-voice-agent.git"
   },
   "bugs": {
-    "url": "https://github.com/AlexKaiqi/dsh-realtime-voice/issues"
+    "url": "https://github.com/AlexKaiqi/dsh-voice-agent/issues"
   },
-  "homepage": "https://github.com/AlexKaiqi/dsh-realtime-voice#readme",
+  "homepage": "https://github.com/AlexKaiqi/dsh-voice-agent#readme",
   "scripts": {
     "test": "node --test test/*.test.mjs test/*.test.cjs",
     "check": "node --check dsh/index.js && node --check dsh/service.js && node --check dsh/transport.js && node --check client/client.js && npm test"
@@ -40,10 +40,10 @@
   "dsh": {
     "inventory": {
       "summary": {
-        "zh": "为多模型运行时注册 GPT Realtime 与豆包 Duplex 适配，并提供浏览器实时音频传输。",
-        "en": "Registers GPT Realtime and Doubao Duplex adapters with the multi-model runtime and exposes browser audio transports."
+        "zh": "让产品与任意 Agent 开始可打断、可行动的全双工语音对话，底层适配 GPT Realtime 与豆包 Duplex。",
+        "en": "Lets products start interruptible, action-capable full-duplex voice conversations with an Agent over GPT Realtime or Doubao Duplex."
       },
-      "tags": ["voice", "realtime", "speech", "runtime"],
+      "tags": ["voice", "agent", "duplex", "conversation"],
       "dependencies": ["dsh-multi-model-provider"]
     },
     "bundle": { "patch": "./cordis.patch.yml" },

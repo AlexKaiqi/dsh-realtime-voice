@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { doubaoRealtimeAdapter, openAIRealtimeAdapter, realtimeVoiceAdapters } from '../dsh/service.js'
+import { doubaoRealtimeAdapter, openAIRealtimeAdapter, voiceAgentAdapters } from '../dsh/service.js'
 
 const profile = {
   id: 'session-assistant',
@@ -9,7 +9,7 @@ const profile = {
 }
 
 test('exports the exact GPT and Doubao adapter ids consumed by the multi-model catalog', () => {
-  assert.deepEqual(realtimeVoiceAdapters().map(adapter => adapter.id), ['openai-webrtc', 'doubao-realtime-duplex'])
+  assert.deepEqual(voiceAgentAdapters().map(adapter => adapter.id), ['openai-webrtc', 'doubao-realtime-duplex'])
 })
 
 test('assembles an OpenAI WebRTC session from runtime-owned route and role data', () => {

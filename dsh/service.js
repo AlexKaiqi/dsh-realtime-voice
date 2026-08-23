@@ -52,6 +52,6 @@ export const doubaoRealtimeAdapter = {
   },
 }
 
-export function realtimeVoiceAdapters() {
+export function voiceAgentAdapters() {
   return [openAIRealtimeAdapter, doubaoRealtimeAdapter]
 }

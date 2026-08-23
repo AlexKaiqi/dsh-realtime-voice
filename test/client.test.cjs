@@ -1,19 +1,28 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
-const { REALTIME_WS_PROTOCOL, RealtimeHandle, RealtimeVoiceService, normalizeProviderEvent, normalizeMediaError } = require('../client/client.js')
+const { REALTIME_WS_PROTOCOL, VoiceConversation, VoiceAgentService, normalizeProviderEvent, normalizeMediaError } = require('../client/client.js')
 
 test('exports the browser websocket subprotocol used by the Host authorization fence', () => {
-  assert.equal(REALTIME_WS_PROTOCOL, 'dsh-realtime-voice-v1')
+  assert.equal(REALTIME_WS_PROTOCOL, 'dsh-voice-agent-v1')
 })
 
 test('constructs against the Cordis class-based Service contract', () => {
   const provided = []
   const ctx = { reflect: { provide(name, service) { provided.push([name, service]) } } }
-  const service = new RealtimeVoiceService(ctx, { root: {}, basePath: '/voice' })
-  assert.equal(service.name, 'realtimeVoice')
+  const service = new VoiceAgentService(ctx, { root: {}, basePath: '/voice' })
+  assert.equal(service.name, 'voiceAgent')
   assert.equal(service.basePath, '/voice')
-  assert.deepEqual(provided, [['realtimeVoice', service]])
+  assert.deepEqual(provided, [['voiceAgent', service], ['realtimeVoice', service]])
   service.dispose()
+})
+
+test('startConversation infers the provider protocol from the selected route', async () => {
+  const service = Object.create(VoiceAgentService.prototype)
+  service.models = async () => [{ id: 'local/voice-agent', protocol: 'unsupported-test-protocol' }]
+  await assert.rejects(
+    () => service.startConversation({ routeId: 'local/voice-agent' }),
+    /does not support a duplex Agent conversation/,
+  )
 })
 
 test('normalizes provider events to the public service contract', () => {
@@ -26,7 +35,7 @@ test('normalizes provider events to the public service contract', () => {
   assert.deepEqual(normalizeProviderEvent('doubao-realtime-duplex', { type: 'conversation.item.input_audio_transcription.delta', delta: 'hel' }), { type: 'transcript', role: 'input', source: 'input', text: 'hel', final: false })
   assert.deepEqual(normalizeProviderEvent('doubao-realtime-duplex', { type: 'conversation.item.input_audio_transcription.started', delta: 'h' }), { type: 'transcript', role: 'input', source: 'input', text: 'h', final: false })
   assert.deepEqual(normalizeProviderEvent('doubao-realtime-duplex', { type: 'response.output_text.delta', delta: 'answer' }), { type: 'transcript', role: 'output', source: 'output', text: 'answer', final: false })
-  assert.deepEqual(normalizeProviderEvent('doubao-realtime-duplex', { type: 'response.function_call_arguments.done', call_id: 'c1', name: 'tool', arguments: '{}' }), { type: 'tool', callId: 'c1', name: 'tool', arguments: '{}' })
+  assert.deepEqual(normalizeProviderEvent('doubao-realtime-duplex', { type: 'response.function_call_arguments.done', call_id: 'c1', name: 'tool', arguments: '{}' }), { type: 'action', callId: 'c1', name: 'tool', arguments: '{}' })
   assert.deepEqual(normalizeProviderEvent('doubao-realtime-duplex', { type: 'error', error: { code: 'bad', message: 'failed' } }), { type: 'error', code: 'bad', message: 'failed', recoverable: true })
   assert.equal(normalizeProviderEvent('openai-webrtc', { type: 'provider.internal' }), null)
 })
@@ -63,7 +72,7 @@ test('media errors normalize without mutating a read-only code getter (DOMExcept
 })
 
 test('realtime handle replays startup events emitted before the first subscriber', () => {
-  const handle = new RealtimeHandle('openai-webrtc')
+  const handle = new VoiceConversation('openai-webrtc')
   handle.emit({ type: 'phase', phase: 'connecting' })
   handle.emit({ type: 'status', connected: true, status: 'ready' })
   handle.emit({ type: 'phase', phase: 'listening' })
@@ -80,7 +89,7 @@ test('realtime handle replays startup events emitted before the first subscriber
 })
 
 test('realtime handle exposes contract methods and disposes owned resources once', () => {
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   const sent = []
   const events = []
   let cleanups = 0
@@ -90,7 +99,7 @@ test('realtime handle exposes contract methods and disposes owned resources once
   handle.own(() => { cleanups += 1 })
   const unsubscribe = handle.subscribe(event => events.push(event))
   handle.updateContext('context')
-  handle.resolveTool('call-1', { ok: true }, { continueResponse: true })
+  handle.resolveAction('call-1', { ok: true }, { continueResponse: true })
   handle.interrupt()
   assert.deepEqual(sent, [
     { type: 'context.update', context: 'context' },
@@ -101,18 +110,18 @@ test('realtime handle exposes contract methods and disposes owned resources once
   assert.deepEqual(events, [{ type: 'interrupted' }])
   assert.equal(playbackCancels, 1)
   unsubscribe()
-  handle.close()
-  handle.close()
+  handle.end()
+  handle.end()
   assert.equal(cleanups, 1)
   assert.throws(() => handle.updateContext('late'), /closed/)
 })
 
 test('late-callback generation guard is invalidated by close', () => {
-  const handle = new RealtimeHandle('openai-webrtc')
+  const handle = new VoiceConversation('openai-webrtc')
   let calls = 0
   const callback = handle.guard(() => { calls += 1 })
   callback()
-  handle.close()
+  handle.end()
   callback()
   assert.equal(calls, 1)
 })
@@ -143,7 +152,7 @@ test('OpenAI startup replays readiness, interrupts playback, and cleans resource
     async setRemoteDescription() { channel.onopen() }
     close() { this.closed = true }
   }
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = {
     navigator: { mediaDevices: { getUserMedia: async () => stream } },
     RTCPeerConnection: Peer,
@@ -151,9 +160,9 @@ test('OpenAI startup replays readiness, interrupts playback, and cleans resource
     MediaStream: function () {},
     fetch: async () => ({ ok: true, text: async () => 'v=0' }),
   }
-  service.basePath = '/dsh-realtime-voice'
+  service.basePath = '/dsh-voice-agent'
   service.handles = new Set()
-  const handle = await service.open({ protocol: 'openai-webrtc', profileId: 'session-assistant', ownerId: 'session-assistant:s1' })
+  const handle = await service.startConversation({ protocol: 'openai-webrtc', profileId: 'session-assistant', ownerId: 'session-assistant:s1' })
   const events = []
   handle.subscribe(event => events.push(event))
   assert.deepEqual(events, [
@@ -168,7 +177,7 @@ test('OpenAI startup replays readiness, interrupts playback, and cleans resource
   assert.equal(sent.at(-1).type, 'response.cancel')
   channel.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta' }) })
   assert.equal(audio.srcObject, remoteStream)
-  handle.close()
+  handle.end()
   assert.equal(track.stopped, true)
   assert.equal(peer.closed, true)
   assert.equal(channel.closed, true)
@@ -188,16 +197,16 @@ test('output-only OpenAI preview sends one text turn without microphone access',
     async setRemoteDescription() { channel.onopen() }
     close() {}
   }
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = {
     navigator: { mediaDevices: { getUserMedia: async () => { throw new Error('microphone must not be requested') } } },
     RTCPeerConnection: Peer,
     document: { createElement: () => ({ pause() {}, play() { return Promise.resolve() }, remove() {} }) },
     fetch: async () => ({ ok: true, text: async () => 'v=0' }),
   }
-  service.basePath = '/dsh-realtime-voice'
+  service.basePath = '/dsh-voice-agent'
   service.handles = new Set()
-  const handle = await service.open({ protocol: 'openai-webrtc', outputOnly: true, previewText: 'Hello preview' })
+  const handle = await service.startConversation({ protocol: 'openai-webrtc', outputOnly: true, previewText: 'Hello preview' })
   const events = []
   handle.subscribe(event => events.push(event))
   assert.deepEqual(transceiver, { kind: 'audio', options: { direction: 'recvonly' } })
@@ -206,7 +215,7 @@ test('output-only OpenAI preview sends one text turn without microphone access',
     { type: 'response.create' },
   ])
   assert.deepEqual(events.map(event => event.phase || event.status), ['connecting', 'ready', 'thinking'])
-  handle.close()
+  handle.end()
 })
 
 test('OpenAI startup failure closes already allocated browser resources', async () => {
@@ -222,16 +231,16 @@ test('OpenAI startup failure closes already allocated browser resources', async 
     close() { this.closed = true }
   }
   const audio = { pause() {}, remove() { this.removed = true } }
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = {
     navigator: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track] }) } },
     RTCPeerConnection: Peer,
     document: { createElement: () => audio },
     fetch: async () => { throw new Error('network failed') },
   }
-  service.basePath = '/dsh-realtime-voice'
+  service.basePath = '/dsh-voice-agent'
   service.handles = new Set()
-  await assert.rejects(() => service.open({ protocol: 'openai-webrtc' }), /network failed/)
+  await assert.rejects(() => service.startConversation({ protocol: 'openai-webrtc' }), /network failed/)
   assert.equal(track.stopped, true)
   assert.equal(peer.closed, true)
   assert.equal(channel.closed, true)
@@ -242,13 +251,13 @@ test('OpenAI startup failure closes already allocated browser resources', async 
 test('missing microphone surfaces as a normalized mic_not_found rejection', async () => {
   const notFound = new Error('Requested device not found')
   notFound.name = 'NotFoundError'
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = {
     navigator: { mediaDevices: { getUserMedia: async () => { throw notFound } } },
   }
-  service.basePath = '/dsh-realtime-voice'
+  service.basePath = '/dsh-voice-agent'
   service.handles = new Set()
-  await assert.rejects(() => service.open({ protocol: 'doubao-realtime-duplex' }), error => {
+  await assert.rejects(() => service.startConversation({ protocol: 'doubao-realtime-duplex' }), error => {
     assert.equal(error.code, 'mic_not_found')
     assert.match(error.message, /No microphone input device was found/)
     return true
@@ -270,24 +279,24 @@ test('doubao duplex drops the OpenAI-only response.create after a tool result', 
   AudioContext.prototype.createMediaStreamSource = function () { return { connect() {} } }
   AudioContext.prototype.createScriptProcessor = function () { return { connect() {}, disconnect() {}, onaudioprocess: null } }
   AudioContext.prototype.close = function () {}
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = {
     navigator: { mediaDevices: { getUserMedia: async () => { throw new Error('microphone must not be requested') } } },
     AudioContext,
     WebSocket: WSocket,
     location: { protocol: 'http:', host: 'localhost:3080' },
   }
-  service.basePath = '/dsh-realtime-voice'
+  service.basePath = '/dsh-voice-agent'
   service.handles = new Set()
-  const handle = await service.open({ protocol: 'doubao-realtime-duplex', outputOnly: true })
+  const handle = await service.startConversation({ protocol: 'doubao-realtime-duplex', outputOnly: true })
   socket.onopen()
-  handle.resolveTool('call-1', { ok: true })
+  handle.resolveAction('call-1', { ok: true })
   assert.deepEqual(sent, [
     { type: 'session.start' },
     { type: 'tool.result', call_id: 'call-1', output: '{"ok":true}' },
   ])
   assert.equal(sent.some(event => event.type === 'response.create'), false)
-  handle.close()
+  handle.end()
 })
 
 test('browser recognition error codes normalize to the same mic codes', () => {
@@ -297,7 +306,7 @@ test('browser recognition error codes normalize to the same mic codes', () => {
     start() {}
     stop() {}
   }
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = { SpeechRecognition: Recognition }
   service.auxiliary = new Set()
   service.inputLease = null
@@ -319,7 +328,7 @@ test('continuous recognition restarts after an idle end so wake-word standby sur
     start() { this.starts += 1 }
     stop() { this.stopped = true }
   }
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = {
     SpeechRecognition: Recognition,
     setTimeout(callback) { timers += 1; callback() },
@@ -353,7 +362,7 @@ test('browser capabilities expose an exclusive audio-input lease', () => {
     start() {}
     stop() { this.stopped = true }
   }
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = {
     isSecureContext: true,
     navigator: { mediaDevices: { getUserMedia() {} } },
@@ -388,7 +397,7 @@ test('browser capabilities expose an exclusive audio-input lease', () => {
 
 test('an active consumer preempts a preemptible standby recognizer', () => {
   class Recognition { start() {} stop() { this.stopped = true } }
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.root = { SpeechRecognition: Recognition }
   service.auxiliary = new Set()
   service.inputLease = null
@@ -403,69 +412,69 @@ test('an active consumer preempts a preemptible standby recognizer', () => {
   assert.equal(service.inputLease, null)
 })
 
-test('registerTools resolves matched tool events through the executor and emits tool-result', async () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+test('registerActions resolves matched action events through the executor and emits action-result', async () => {
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
   const results = []
-  const registry = service.registerTools('session-assistant:s1', {
+  const registry = service.registerActions('session-assistant:s1', {
     update_working_draft: { execute: args => ({ ok: true, draft: args.draft }) },
   })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
-  handle.subscribe(event => { if (event.type === 'tool-result') results.push(event) })
+  handle.subscribe(event => { if (event.type === 'action-result') results.push(event) })
   const sent = []
-  handle.resolveTool = (callId, result, options) => { sent.push({ callId, result, options }) }
-  handle.emit({ type: 'tool', callId: 'c1', name: 'update_working_draft', arguments: '{"draft":"hello"}' })
+  handle.resolveAction = (callId, result, options) => { sent.push({ callId, result, options }) }
+  handle.emit({ type: 'action', callId: 'c1', name: 'update_working_draft', arguments: '{"draft":"hello"}' })
   await Promise.resolve()
   assert.deepEqual(sent, [{ callId: 'c1', result: { ok: true, draft: 'hello' }, options: undefined }])
-  assert.deepEqual(results, [{ type: 'tool-result', callId: 'c1', name: 'update_working_draft', ok: true, output: { ok: true, draft: 'hello' } }])
+  assert.deepEqual(results, [{ type: 'action-result', callId: 'c1', name: 'update_working_draft', ok: true, output: { ok: true, draft: 'hello' } }])
   registry.dispose()
 })
 
-test('a matched owner with an unknown tool name resolves an error instead of leaving the model waiting', () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+test('a matched owner with an unknown action name resolves an error instead of leaving the model waiting', () => {
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
-  service.registerTools('session-assistant:s1', { update_working_draft: { execute: () => ({ ok: true }) } })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  service.registerActions('session-assistant:s1', { update_working_draft: { execute: () => ({ ok: true }) } })
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
-  handle.resolveTool = (callId, result) => sent.push({ callId, result })
-  handle.emit({ type: 'tool', callId: 'c2', name: 'submit_to_agent', arguments: '{}' })
-  assert.deepEqual(sent, [{ callId: 'c2', result: { ok: false, error: 'Unknown tool: submit_to_agent' } }])
+  handle.resolveAction = (callId, result) => sent.push({ callId, result })
+  handle.emit({ type: 'action', callId: 'c2', name: 'submit_to_agent', arguments: '{}' })
+  assert.deepEqual(sent, [{ callId: 'c2', result: { ok: false, error: 'Unknown action: submit_to_agent' } }])
 })
 
 test('handles without a matching registry keep the legacy consumer-resolved behavior', () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
-  service.registerTools('pet-assistant', { ask_knowledge: { execute: () => ({ ok: true }) } })
-  const handle = new RealtimeHandle('openai-webrtc')
+  service.registerActions('pet-assistant', { ask_knowledge: { execute: () => ({ ok: true }) } })
+  const handle = new VoiceConversation('openai-webrtc')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
-  handle.resolveTool = (callId, result) => sent.push({ callId, result })
-  handle.emit({ type: 'tool', callId: 'c3', name: 'update_working_draft', arguments: '{}' })
+  handle.resolveAction = (callId, result) => sent.push({ callId, result })
+  handle.emit({ type: 'action', callId: 'c3', name: 'update_working_draft', arguments: '{}' })
   assert.deepEqual(sent, [])
 })
 
 test('async executors settle the tool result and continue the response after completion', async () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
   let finish
-  service.registerTools('session-assistant:s1', {
+  service.registerActions('session-assistant:s1', {
     delegate: { execute: () => new Promise(resolve => { finish = resolve }) },
   })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
-  handle.resolveTool = (callId, result, options) => sent.push({ callId, result, options })
-  handle.emit({ type: 'tool', callId: 'c4', name: 'delegate', arguments: '{}' })
+  handle.resolveAction = (callId, result, options) => sent.push({ callId, result, options })
+  handle.emit({ type: 'action', callId: 'c4', name: 'delegate', arguments: '{}' })
   assert.deepEqual(sent, [], 'no result is sent while the async executor is pending')
   finish({ ok: true, task: 't1' })
   await Promise.resolve()
@@ -473,62 +482,62 @@ test('async executors settle the tool result and continue the response after com
 })
 
 test('control.resolve lets the executor settle first and run follow-up work afterwards', () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
   const order = []
-  service.registerTools('session-assistant:s1', {
+  service.registerActions('session-assistant:s1', {
     submit_to_agent: { execute: (args, control) => {
       order.push('resolve')
       control.resolve({ ok: true, draft: args.draft })
       order.push('submit')
     } },
   })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
-  handle.resolveTool = (callId, result, options) => { sent.push({ callId, result, options }) }
-  handle.emit({ type: 'tool', callId: 'c5', name: 'submit_to_agent', arguments: '{"draft":"final"}' })
+  handle.resolveAction = (callId, result, options) => { sent.push({ callId, result, options }) }
+  handle.emit({ type: 'action', callId: 'c5', name: 'submit_to_agent', arguments: '{"draft":"final"}' })
   assert.deepEqual(order, ['resolve', 'submit'])
   assert.deepEqual(sent, [{ callId: 'c5', result: { ok: true, draft: 'final' }, options: undefined }])
 })
 
 test('throwing executors resolve an error result instead of leaving the model waiting', () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
-  service.registerTools('session-assistant:s1', { boom: { execute: () => { throw new Error('action failed') } } })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  service.registerActions('session-assistant:s1', { boom: { execute: () => { throw new Error('action failed') } } })
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
-  handle.resolveTool = (callId, result) => sent.push({ callId, result })
-  handle.emit({ type: 'tool', callId: 'c6', name: 'boom', arguments: '{}' })
+  handle.resolveAction = (callId, result) => sent.push({ callId, result })
+  handle.emit({ type: 'action', callId: 'c6', name: 'boom', arguments: '{}' })
   assert.deepEqual(sent, [{ callId: 'c6', result: { ok: false, error: 'action failed' } }])
 })
 
 test('invalid tool arguments resolve an error result', () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
-  service.registerTools('session-assistant:s1', { update_working_draft: { execute: () => ({ ok: true }) } })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  service.registerActions('session-assistant:s1', { update_working_draft: { execute: () => ({ ok: true }) } })
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
-  handle.resolveTool = (callId, result) => sent.push({ callId, result })
-  handle.emit({ type: 'tool', callId: 'c7', name: 'update_working_draft', arguments: 'not json' })
-  assert.deepEqual(sent, [{ callId: 'c7', result: { ok: false, error: 'Invalid tool arguments.' } }])
+  handle.resolveAction = (callId, result) => sent.push({ callId, result })
+  handle.emit({ type: 'action', callId: 'c7', name: 'update_working_draft', arguments: 'not json' })
+  assert.deepEqual(sent, [{ callId: 'c7', result: { ok: false, error: 'Invalid action arguments.' } }])
 })
 
-test('registerTools validates its arguments and dispose removes the entry', () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+test('registerActions validates its arguments and dispose removes the entry', () => {
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
-  assert.throws(() => service.registerTools('', {}), TypeError)
-  assert.throws(() => service.registerTools('owner', []), TypeError)
-  assert.throws(() => service.registerTools('owner', { bad: {} }), /execute function/)
-  const registry = service.registerTools('owner', { ok: { execute: () => ({ ok: true }) } })
+  assert.throws(() => service.registerActions('', {}), TypeError)
+  assert.throws(() => service.registerActions('owner', []), TypeError)
+  assert.throws(() => service.registerActions('owner', { bad: {} }), /execute function/)
+  const registry = service.registerActions('owner', { ok: { execute: () => ({ ok: true }) } })
   assert.equal(service.lookupTools('owner:x').ok, registry ? service.toolRegistries[0].tools.ok : null)
   registry.dispose()
   assert.equal(service.lookupTools('owner:x'), null)
@@ -536,44 +545,44 @@ test('registerTools validates its arguments and dispose removes the entry', () =
 })
 
 test('async executors that never settle are resolved with a timeout instead of hanging the model', async () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
-  service.registerTools('session-assistant:s1', {
+  service.registerActions('session-assistant:s1', {
     never_settles: { timeoutMs: 25, execute: () => new Promise(() => {}) },
   })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
   const results = []
-  handle.resolveTool = (callId, result) => sent.push({ callId, result })
-  handle.subscribe(event => { if (event.type === 'tool-result') results.push(event) })
-  handle.emit({ type: 'tool', callId: 'c8', name: 'never_settles', arguments: '{}' })
+  handle.resolveAction = (callId, result) => sent.push({ callId, result })
+  handle.subscribe(event => { if (event.type === 'action-result') results.push(event) })
+  handle.emit({ type: 'action', callId: 'c8', name: 'never_settles', arguments: '{}' })
   assert.deepEqual(sent, [], 'no result before the timeout fires')
   await new Promise(resolve => setTimeout(resolve, 40))
-  assert.deepEqual(sent, [{ callId: 'c8', result: { ok: false, error: 'Tool execution timed out.' } }])
-  // tool-result.ok means the result was delivered; the executor outcome is in output.
+  assert.deepEqual(sent, [{ callId: 'c8', result: { ok: false, error: 'Action execution timed out.' } }])
+  // action-result.ok means the result was delivered; the executor outcome is in output.
   assert.equal(results[0].ok, true)
   assert.equal(results[0].output.ok, false)
   assert.match(results[0].output.error, /timed out/)
 })
 
 test('timeout does not fire for sync executors or settled async executors', async () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
-  service.registerTools('session-assistant:s1', {
+  service.registerActions('session-assistant:s1', {
     sync_ok: { timeoutMs: 25, execute: () => ({ ok: true, fast: true }) },
     async_ok: { timeoutMs: 25, execute: async () => ({ ok: true, async: true }) },
   })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
-  handle.resolveTool = (callId, result) => sent.push({ callId, result })
-  handle.emit({ type: 'tool', callId: 'c9', name: 'sync_ok', arguments: '{}' })
-  handle.emit({ type: 'tool', callId: 'c10', name: 'async_ok', arguments: '{}' })
+  handle.resolveAction = (callId, result) => sent.push({ callId, result })
+  handle.emit({ type: 'action', callId: 'c9', name: 'sync_ok', arguments: '{}' })
+  handle.emit({ type: 'action', callId: 'c10', name: 'async_ok', arguments: '{}' })
   await Promise.resolve()
   assert.deepEqual(sent.map(item => item.callId), ['c9', 'c10'])
   await new Promise(resolve => setTimeout(resolve, 40))
@@ -581,37 +590,37 @@ test('timeout does not fire for sync executors or settled async executors', asyn
 })
 
 test('closing the handle cancels the pending timeout timer', async () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
-  service.registerTools('session-assistant:s1', {
+  service.registerActions('session-assistant:s1', {
     slow: { timeoutMs: 25, execute: () => new Promise(() => {}) },
   })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const sent = []
-  handle.resolveTool = (callId, result) => sent.push({ callId, result })
-  handle.emit({ type: 'tool', callId: 'c11', name: 'slow', arguments: '{}' })
-  handle.close()
+  handle.resolveAction = (callId, result) => sent.push({ callId, result })
+  handle.emit({ type: 'action', callId: 'c11', name: 'slow', arguments: '{}' })
+  handle.end()
   await new Promise(resolve => setTimeout(resolve, 40))
   assert.deepEqual(sent, [], 'no resolution after the handle is closed')
 })
 
-test('tool-result events bound large string payloads for subscribers', () => {
-  const service = Object.create(RealtimeVoiceService.prototype)
+test('action-result events bound large string payloads for subscribers', () => {
+  const service = Object.create(VoiceAgentService.prototype)
   service.toolRegistries = []
   service.handles = new Set()
-  service.registerTools('session-assistant:s1', {
+  service.registerActions('session-assistant:s1', {
     update_working_draft: { execute: () => ({ ok: true, draft: 'x'.repeat(20000) }) },
   })
-  const handle = new RealtimeHandle('doubao-realtime-duplex')
+  const handle = new VoiceConversation('doubao-realtime-duplex')
   handle.ownerId = 'session-assistant:s1'
   service.track(handle)
   const results = []
-  handle.resolveTool = () => {}
-  handle.subscribe(event => { if (event.type === 'tool-result') results.push(event) })
-  handle.emit({ type: 'tool', callId: 'c12', name: 'update_working_draft', arguments: '{}' })
+  handle.resolveAction = () => {}
+  handle.subscribe(event => { if (event.type === 'action-result') results.push(event) })
+  handle.emit({ type: 'action', callId: 'c12', name: 'update_working_draft', arguments: '{}' })
   assert.equal(results[0].output.draft.length, 4001, 'large strings are bounded with an ellipsis')
   assert.equal(results[0].output.ok, true)
 })

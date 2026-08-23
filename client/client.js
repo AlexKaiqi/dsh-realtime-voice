@@ -1,6 +1,6 @@
 (function (root, factory) {
   if (root && root.__ModuleLoader__) {
-    root.__ModuleLoader__.load({ id: 'dsh-realtime-voice', factory: function (require) {
+    root.__ModuleLoader__.load({ id: 'dsh-voice-agent', factory: function (require) {
       var module = { exports: {} }
       factory(module, module.exports, require, root)
       return module.exports
@@ -13,9 +13,9 @@
 
   var Cordis = require('@deepseek-ai/cordis')
   var Service = Cordis.Service
-  var BASE_PATH = '/dsh-realtime-voice'
-  var MARKER = 'x-dsh-realtime-voice'
-  var WS_PROTOCOL = 'dsh-realtime-voice-v1'
+  var BASE_PATH = '/dsh-voice-agent'
+  var MARKER = 'x-dsh-voice-agent'
+  var WS_PROTOCOL = 'dsh-voice-agent-v1'
   var protocols = Object.freeze(['openai-webrtc', 'doubao-realtime-duplex'])
   var nextHandleId = 1
   /** Defensive ceiling for async tool executors that never settle. */
@@ -59,7 +59,7 @@
   function voiceLog(direction, detail) {
     try {
       var sink = root.console || (typeof console !== 'undefined' ? console : null)
-      if (sink && typeof sink.log === 'function') sink.log('[realtime-voice]', direction, detail)
+      if (sink && typeof sink.log === 'function') sink.log('[voice-agent]', direction, detail)
     } catch (_) { /* logging must never break the voice loop */ }
   }
 
@@ -148,7 +148,7 @@
     if (type === 'response.audio_transcript.done' || type === 'response.output_audio_transcript.done' || type === 'response.output_text.done' || type === 'response.text.done') {
       return transcriptEvent('output', event.transcript || event.text, true)
     }
-    if (type === 'response.function_call_arguments.done') return { type: 'tool', callId: text(event.call_id), name: text(event.name), arguments: text(event.arguments) }
+    if (type === 'response.function_call_arguments.done') return { type: 'action', callId: text(event.call_id), name: text(event.name), arguments: text(event.arguments) }
     if (type === 'response.cancelled') return { type: 'interrupted' }
     if (type === 'error') {
       var detail = object(event.error)
@@ -162,8 +162,8 @@
     channel.send(JSON.stringify(event))
   }
 
-  function RealtimeHandle(protocol) {
-    this.id = 'realtime-voice-' + nextHandleId++
+  function VoiceConversation(protocol) {
+    this.id = 'voice-agent-' + nextHandleId++
     this.protocol = protocol
     this.events = emitter()
     this.generation = 1
@@ -176,7 +176,7 @@
     this.pendingEvents = []
   }
 
-  RealtimeHandle.prototype.subscribe = function (listener) {
+  VoiceConversation.prototype.subscribe = function (listener) {
     var dispose = this.events.subscribe(listener)
     if (!this.hasSubscriber) {
       this.hasSubscriber = true
@@ -185,38 +185,37 @@
     }
     return dispose
   }
-  RealtimeHandle.prototype.emit = function (event) {
+  VoiceConversation.prototype.emit = function (event) {
     if (this.closed) return
     if (!this.hasSubscriber && this.pendingEvents.length < 16) this.pendingEvents.push(event)
     this.events.emit(event)
-    // Dual output: the runtime resolves registered tool calls itself (async
-    // results included) so product layers only register executors. Consumers
-    // without a matching registry keep the legacy behavior of resolving tools
-    // through the handle themselves.
-    if (event && event.type === 'tool' && this.service) this.service.dispatchTool(this, event)
+    // Dual output: the runtime resolves registered action requests itself
+    // (async results included) so product layers only register executors.
+    if (event && event.type === 'action' && this.service) this.service.dispatchAction(this, event)
   }
-  RealtimeHandle.prototype.guard = function (callback) {
+  VoiceConversation.prototype.guard = function (callback) {
     var self = this
     var generation = this.generation
     return function () { if (!self.closed && self.generation === generation) return callback.apply(this, arguments) }
   }
-  RealtimeHandle.prototype.own = function (cleanup) { if (typeof cleanup === 'function') this.cleanups.push(cleanup); return cleanup }
-  RealtimeHandle.prototype.updateContext = function (context) { this.sendEvent({ type: 'context.update', context: context }) }
-  RealtimeHandle.prototype.resolveTool = function (callId, result, options) {
+  VoiceConversation.prototype.own = function (cleanup) { if (typeof cleanup === 'function') this.cleanups.push(cleanup); return cleanup }
+  VoiceConversation.prototype.updateContext = function (context) { this.sendEvent({ type: 'context.update', context: context }) }
+  VoiceConversation.prototype.resolveAction = function (callId, result, options) {
     this.sendEvent({ type: 'tool.result', call_id: text(callId), output: typeof result === 'string' ? result : JSON.stringify(result) })
     if (!options || options.continueResponse !== false) this.sendEvent({ type: 'response.create' })
   }
-  RealtimeHandle.prototype.interrupt = function () {
+  VoiceConversation.prototype.resolveTool = VoiceConversation.prototype.resolveAction
+  VoiceConversation.prototype.interrupt = function () {
     if (this.closed) return
     if (typeof this.cancelPlayback === 'function') this.cancelPlayback()
     if (this.send) this.sendEvent({ type: 'response.cancel' })
     this.emit({ type: 'interrupted' })
   }
-  RealtimeHandle.prototype.sendEvent = function (event) {
+  VoiceConversation.prototype.sendEvent = function (event) {
     if (this.closed || !this.send) throw new Error('Realtime session is closed or not ready')
     this.send(event)
   }
-  RealtimeHandle.prototype.close = function () {
+  VoiceConversation.prototype.end = function () {
     if (this.closed) return
     this.closed = true
     this.generation += 1
@@ -227,6 +226,7 @@
     this.events.emit({ type: 'closed' })
     this.events.clear()
   }
+  VoiceConversation.prototype.close = VoiceConversation.prototype.end
 
   function openAIEvent(handle, event) {
     var normalized = normalizeProviderEvent('openai-webrtc', event)
@@ -235,7 +235,7 @@
   }
 
   async function openOpenAI(service, options) {
-    var handle = service.track(new RealtimeHandle('openai-webrtc'))
+    var handle = service.track(new VoiceConversation('openai-webrtc'))
     handle.ownerId = text(options.ownerId)
     handle.emit({ type: 'phase', phase: 'connecting' })
     try {
@@ -353,7 +353,7 @@
   }
 
   async function openDoubao(service, options) {
-    var handle = service.track(new RealtimeHandle('doubao-realtime-duplex'))
+    var handle = service.track(new VoiceConversation('doubao-realtime-duplex'))
     handle.ownerId = text(options.ownerId)
     handle.emit({ type: 'phase', phase: 'connecting' })
     try {
@@ -527,8 +527,11 @@
     return handle
   }
 
-  function RealtimeVoiceService(ctx, options) {
-    var self = Reflect.construct(Service, [ctx, 'realtimeVoice'], RealtimeVoiceService)
+  function VoiceAgentService(ctx, options) {
+    var self = Reflect.construct(Service, [ctx, 'voiceAgent'], VoiceAgentService)
+    // Temporary compatibility alias for product plugins migrating from the
+    // old transport-oriented service name.
+    if (ctx && ctx.reflect && typeof ctx.reflect.provide === 'function') ctx.reflect.provide('realtimeVoice', self)
     self.root = options && options.root || root
     self.basePath = options && options.basePath || BASE_PATH
     self.handles = new Set()
@@ -538,9 +541,9 @@
     self.generation = 1
     return self
   }
-  RealtimeVoiceService.prototype = Object.create(Service.prototype)
-  RealtimeVoiceService.prototype.constructor = RealtimeVoiceService
-  RealtimeVoiceService.prototype.capabilities = function () {
+  VoiceAgentService.prototype = Object.create(Service.prototype)
+  VoiceAgentService.prototype.constructor = VoiceAgentService
+  VoiceAgentService.prototype.capabilities = function () {
     var media = !!(this.root.navigator && this.root.navigator.mediaDevices && this.root.navigator.mediaDevices.getUserMedia)
     var voices = this.root.speechSynthesis && typeof this.root.speechSynthesis.getVoices === 'function'
       ? this.root.speechSynthesis.getVoices().map(function (voice) { return { id: voice.name, name: voice.name, lang: voice.lang || '', default: !!voice.default } })
@@ -558,13 +561,13 @@
       voices: voices,
     }
   }
-  RealtimeVoiceService.prototype.models = async function () {
+  VoiceAgentService.prototype.models = async function () {
     var response = await this.root.fetch(this.basePath + '/models', { method: 'GET' })
     var body = await response.json()
     if (!response.ok) throw new Error(text(body.error) || 'Unable to list Realtime voice models')
     return Array.isArray(body.models) ? body.models : []
   }
-  RealtimeVoiceService.prototype.acquireInput = function (ownerId, options) {
+  VoiceAgentService.prototype.acquireInput = function (ownerId, options) {
     var service = this
     var normalized = text(ownerId).trim().slice(0, 120) || 'legacy-consumer'
     if (this.inputLease && this.inputLease.preemptible) {
@@ -581,39 +584,42 @@
       if (service.inputLease === lease) service.inputLease = null
     }
   }
-  RealtimeVoiceService.prototype.track = function (handle) {
+  VoiceAgentService.prototype.track = function (handle) {
     var self = this
     this.handles.add(handle)
     handle.service = self
-    var close = handle.close.bind(handle)
-    handle.close = function () { close(); self.handles.delete(handle) }
+    var end = handle.end.bind(handle)
+    var trackedEnd = function () { end(); self.handles.delete(handle) }
+    handle.end = trackedEnd
+    handle.close = trackedEnd
     return handle
   }
-  RealtimeVoiceService.prototype.open = async function (options) {
+  VoiceAgentService.prototype.startConversation = async function (options) {
     options = object(options)
-    if (options.protocol === 'openai-webrtc') return openOpenAI(this, options)
-    if (options.protocol === 'doubao-realtime-duplex') return openDoubao(this, options)
-    throw new Error('Unsupported Realtime voice protocol: ' + text(options.protocol))
+    var protocol = options.protocol
+    if (!protocol && options.routeId) {
+      var models = await this.models()
+      var route = models.find(function (candidate) { return candidate && candidate.id === options.routeId })
+      protocol = route && route.protocol
+    }
+    if (protocol === 'openai-webrtc') return openOpenAI(this, options)
+    if (protocol === 'doubao-realtime-duplex') return openDoubao(this, options)
+    throw new Error('The selected voice route does not support a duplex Agent conversation')
   }
-  RealtimeVoiceService.prototype.recognize = function (options) { return browserRecognition(this, object(options)) }
-  RealtimeVoiceService.prototype.readAloud = function (options) { return browserReadAloud(this, object(options)) }
+  VoiceAgentService.prototype.open = VoiceAgentService.prototype.startConversation
+  VoiceAgentService.prototype.recognize = function (options) { return browserRecognition(this, object(options)) }
+  VoiceAgentService.prototype.readAloud = function (options) { return browserReadAloud(this, object(options)) }
 
-  /**
-   * Register tool executors for one audio-input owner prefix. Handles whose
-   * ownerId starts with the prefix resolve their tool events through these
-   * executors automatically (async results included); the model keeps
-   * speaking while a result is pending (dual output). Consumers without a
-   * matching registry keep resolving tool events themselves.
-   */
-  RealtimeVoiceService.prototype.registerTools = function (ownerPrefix, tools) {
+  /** Register product action executors for one conversation-owner prefix. */
+  VoiceAgentService.prototype.registerActions = function (ownerPrefix, actions) {
     var prefix = text(ownerPrefix)
     if (!prefix) throw new TypeError('ownerPrefix is required')
-    if (!tools || typeof tools !== 'object' || Array.isArray(tools)) throw new TypeError('tools must be an object of executors')
+    if (!actions || typeof actions !== 'object' || Array.isArray(actions)) throw new TypeError('actions must be an object of executors')
     var normalized = {}
-    Object.keys(tools).forEach(function (name) {
-      var tool = object(tools[name])
-      if (typeof tool.execute !== 'function') throw new TypeError('tool ' + name + ' must provide an execute function')
-      normalized[name] = tool
+    Object.keys(actions).forEach(function (name) {
+      var action = object(actions[name])
+      if (typeof action.execute !== 'function') throw new TypeError('action ' + name + ' must provide an execute function')
+      normalized[name] = action
     })
     var entry = { ownerPrefix: prefix, tools: normalized }
     this.toolRegistries.push(entry)
@@ -625,9 +631,10 @@
       },
     }
   }
+  VoiceAgentService.prototype.registerTools = VoiceAgentService.prototype.registerActions
 
   /** Merged executor map for a handle owner; later registrations win on name conflicts. */
-  RealtimeVoiceService.prototype.lookupTools = function (ownerId) {
+  VoiceAgentService.prototype.lookupTools = function (ownerId) {
     var merged = null
     for (var i = this.toolRegistries.length - 1; i >= 0; i -= 1) {
       var entry = this.toolRegistries[i]
@@ -640,10 +647,7 @@
     return merged
   }
 
-  /**
-   * Bound strings inside a tool result for the observable tool-result event:
-   * subscribers only need the outcome shape, not the full 24k draft payload.
-   */
+  /** Bound strings inside an observable action result. */
   function boundedResult(value, max) {
     max = max || 4000
     if (typeof value === 'string') return value.length > max ? value.slice(0, max) + '…' : value
@@ -655,18 +659,14 @@
     return value
   }
 
-  /**
-   * Resolve one tool result back to the provider. Returns whether the result
-   * was actually delivered, and emits a normalized tool-result event so
-   * product layers can observe the outcome of the dual output channel.
-   */
-  RealtimeVoiceService.prototype.settleTool = function (handle, event, result, options) {
+  /** Resolve one action result through the provider-specific wire. */
+  VoiceAgentService.prototype.settleAction = function (handle, event, result, options) {
     try {
-      handle.resolveTool(event.callId, result, options)
-      handle.emit({ type: 'tool-result', callId: event.callId, name: event.name, ok: true, output: boundedResult(result) })
+      handle.resolveAction(event.callId, result, options)
+      handle.emit({ type: 'action-result', callId: event.callId, name: event.name, ok: true, output: boundedResult(result) })
       return true
     } catch (error) {
-      handle.emit({ type: 'tool-result', callId: event.callId, name: event.name, ok: false, error: errorMessage(error) })
+      handle.emit({ type: 'action-result', callId: event.callId, name: event.name, ok: false, error: errorMessage(error) })
       return false
     }
   }
@@ -676,17 +676,17 @@
    * executor may return a plain value, a Promise, or call control.resolve
    * itself when it must settle the result before running follow-up work.
    */
-  RealtimeVoiceService.prototype.dispatchTool = function (handle, event) {
+  VoiceAgentService.prototype.dispatchAction = function (handle, event) {
     var tools = this.lookupTools(handle.ownerId)
     if (!tools) return
     var executor = tools[event.name]
     if (typeof executor !== 'object' || typeof executor.execute !== 'function') {
-      this.settleTool(handle, event, { ok: false, error: 'Unknown tool: ' + text(event.name) })
+      this.settleAction(handle, event, { ok: false, error: 'Unknown action: ' + text(event.name) })
       return
     }
     var args = parseToolArguments(event.arguments)
     if (args === undefined) {
-      this.settleTool(handle, event, { ok: false, error: 'Invalid tool arguments.' })
+      this.settleAction(handle, event, { ok: false, error: 'Invalid action arguments.' })
       return
     }
     var self = this
@@ -699,7 +699,7 @@
     var timer = null
     if (timeoutMs > 0) {
       timer = setTimeout(function () {
-        if (!resolved && !handle.closed) control.resolve({ ok: false, error: 'Tool execution timed out.' })
+        if (!resolved && !handle.closed) control.resolve({ ok: false, error: 'Action execution timed out.' })
       }, timeoutMs)
       if (typeof handle.own === 'function') handle.own(function () { clearTimeout(timer) })
     }
@@ -708,7 +708,7 @@
         if (resolved || handle.closed) return false
         resolved = true
         if (timer !== null) clearTimeout(timer)
-        return self.settleTool(handle, event, result, options)
+        return self.settleAction(handle, event, result, options)
       },
     }
     var outcome
@@ -716,7 +716,7 @@
       outcome = executor.execute(args, control)
     } catch (error) {
       if (timer !== null) clearTimeout(timer)
-      if (!resolved) this.settleTool(handle, event, { ok: false, error: errorMessage(error) })
+      if (!resolved) this.settleAction(handle, event, { ok: false, error: errorMessage(error) })
       return
     }
     if (outcome && typeof outcome.then === 'function') {
@@ -733,7 +733,7 @@
     if (!resolved) control.resolve(outcome === undefined ? { ok: true } : outcome)
   }
 
-  RealtimeVoiceService.prototype.dispose = function () {
+  VoiceAgentService.prototype.dispose = function () {
     this.generation += 1
     this.handles.forEach(function (handle) { handle.close() })
     this.auxiliary.forEach(function (handle) { handle.close() })
@@ -744,15 +744,17 @@
   }
 
   function apply(ctx) {
-    var service = new RealtimeVoiceService(ctx)
-    if (typeof ctx.effect === 'function') ctx.effect(function () { return function () { service.dispose() } }, 'dsh-realtime-voice.client')
+    var service = new VoiceAgentService(ctx)
+    if (typeof ctx.effect === 'function') ctx.effect(function () { return function () { service.dispose() } }, 'dsh-voice-agent.client')
   }
 
-  exports.name = 'dsh-realtime-voice'
+  exports.name = 'dsh-voice-agent'
   exports.inject = []
   exports.apply = apply
-  exports.RealtimeVoiceService = RealtimeVoiceService
-  exports.RealtimeHandle = RealtimeHandle
+  exports.VoiceAgentService = VoiceAgentService
+  exports.VoiceConversation = VoiceConversation
+  exports.RealtimeVoiceService = VoiceAgentService
+  exports.RealtimeHandle = VoiceConversation
   exports.normalizeProviderEvent = normalizeProviderEvent
   exports.normalizeMediaError = normalizeMediaError
   exports.REALTIME_WS_PROTOCOL = WS_PROTOCOL

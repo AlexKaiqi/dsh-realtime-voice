@@ -1,6 +1,6 @@
 {
-  "version": 4,
-  "name": "realtime-voice-provider-runtime",
+  "version": 5,
+  "name": "duplex-voice-agent",
   "runtime": "dsh-multi-model-provider/realtimeModelRuntime",
   "route": {
     "required": [
@@ -24,22 +24,26 @@
     },
     "browserAuthorization": {
       "httpMarkers": [
-        "x-dsh-realtime-voice",
+        "x-dsh-voice-agent",
         "x-dsh-model-probe"
       ],
-      "websocketSubprotocol": "dsh-realtime-voice-v1",
+      "websocketSubprotocol": "dsh-voice-agent-v1",
       "sameOrigin": true
     }
   },
   "clientService": {
-    "name": "realtimeVoice",
+    "name": "voiceAgent",
     "methods": [
       "capabilities",
+      "startConversation",
+      "registerActions"
+    ],
+    "compatibilityMethods": [
       "models",
       "open",
+      "registerTools",
       "recognize",
-      "readAloud",
-      "registerTools"
+      "readAloud"
     ],
     "capabilities": [
       "secureContext",
@@ -54,24 +58,25 @@
       "ownerOption": "ownerId",
       "conflictCode": "audio_input_busy",
       "standbyPreemption": "recognize-preemptible",
-      "release": "handle-close-or-startup-failure"
+      "release": "conversation-end-or-startup-failure"
     },
-    "toolRegistry": {
-      "registration": "registerTools(ownerPrefix, tools)",
-      "ownerMatch": "handle ownerId startsWith ownerPrefix",
-      "resolution": "registered name → execute(args, control) → resolveTool; unknown name under a matched owner → error result; unmatched owner → consumer resolves",
-      "asyncResults": "execute may return a Promise; speech continues while the result is pending (dual output); executors that never settle are resolved with a timeout error (tool.timeoutMs per tool, default 300000ms)",
+    "actionRegistry": {
+      "registration": "registerActions(ownerPrefix, actions)",
+      "ownerMatch": "conversation ownerId startsWith ownerPrefix",
+      "resolution": "registered name → execute(args, control) → resolveAction; unknown name under a matched owner → error result; unmatched owner → consumer resolves",
+      "asyncResults": "execute may return a Promise; speech continues while the result is pending (dual output); executors that never settle are resolved with a timeout error (action.timeoutMs per action, default 300000ms)",
       "control": "execute may call control.resolve(result, options) to settle before follow-up work",
-      "events": "tool-result emitted after every automatic resolution"
+      "events": "action-result emitted after every automatic resolution"
     },
-    "handle": [
+    "conversation": [
       "id",
       "subscribe",
       "updateContext",
-      "resolveTool",
+      "resolveAction",
       "interrupt",
-      "close"
+      "end"
     ],
+    "compatibilityConversationMethods": ["resolveTool", "close"],
     "events": {
       "status": [
         "connected",
@@ -85,12 +90,12 @@
         "text",
         "final"
       ],
-      "tool": [
+      "action": [
         "callId",
         "name",
         "arguments"
       ],
-      "tool-result": [
+      "action-result": [
         "callId",
         "name",
         "ok",
@@ -111,7 +116,7 @@
     "browser-media-lifecycle",
     "audio-input-arbitration",
     "provider-event-normalization",
-    "tool-execution-loop",
+    "action-execution-loop",
     "dual-output-scheduling"
   ],
   "doesNotOwn": [
