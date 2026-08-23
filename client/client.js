@@ -18,6 +18,8 @@
   var WS_PROTOCOL = 'dsh-realtime-voice-v1'
   var protocols = Object.freeze(['openai-webrtc', 'doubao-realtime-duplex'])
   var nextHandleId = 1
+  /** Defensive ceiling for async tool executors that never settle. */
+  var DEFAULT_TOOL_TIMEOUT_MS = 300000
 
   function object(value) {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
@@ -27,8 +29,88 @@
     return typeof value === 'string' ? value : ''
   }
 
+  function errorMessage(error) {
+    if (error instanceof Error) return error.message || String(error)
+    if (error !== null && typeof error === 'object' && typeof error.message === 'string') return error.message
+    return error === undefined || error === null ? 'Unknown error' : String(error)
+  }
+
+  /** Providers deliver tool arguments as a JSON string; object arguments pass through. */
+  function parseToolArguments(value) {
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) return value
+    if (typeof value !== 'string') return undefined
+    try {
+      var parsed = JSON.parse(value)
+      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined
+    } catch (_) { return undefined }
+  }
+
   function errorEvent(code, message, recoverable) {
     return { type: 'error', code: text(code) || 'realtime_voice_error', message: text(message) || 'Realtime voice error', recoverable: !!recoverable }
+  }
+
+  function inputBusyError(ownerId) {
+    var error = new Error('Audio input is already owned by ' + ownerId)
+    error.code = 'audio_input_busy'
+    error.ownerId = ownerId
+    return error
+  }
+
+  function voiceLog(direction, detail) {
+    try {
+      var sink = root.console || (typeof console !== 'undefined' ? console : null)
+      if (sink && typeof sink.log === 'function') sink.log('[realtime-voice]', direction, detail)
+    } catch (_) { /* logging must never break the voice loop */ }
+  }
+
+  // Stable, consumer-localizable codes for browser media failures. The raw
+  // DOMException message ("Requested device not found", "Permission denied" …)
+  // is replaced with one canonical English sentence per code so every consumer
+  // can show a friendly fallback and map `error.code` to its own language.
+  var MEDIA_ERROR_CODES = {
+    NotFoundError: 'mic_not_found',
+    NotAllowedError: 'mic_permission_denied',
+    SecurityError: 'mic_permission_denied',
+    NotReadableError: 'mic_unreadable',
+    AbortError: 'mic_aborted',
+    OverconstrainedError: 'mic_constraints',
+  }
+  var MEDIA_ERROR_MESSAGES = {
+    mic_not_found: 'No microphone input device was found. Check your system input devices or connect a headset.',
+    mic_permission_denied: 'Microphone permission was denied. Allow microphone access in your browser and system settings.',
+    mic_unreadable: 'The microphone is unavailable or in use by another application.',
+    mic_aborted: 'Microphone access was interrupted. Please try again.',
+    mic_constraints: 'No microphone matches the requested constraints.',
+  }
+  var RECOGNITION_ERROR_CODES = {
+    'not-allowed': 'mic_permission_denied',
+    'service-not-allowed': 'mic_permission_denied',
+    'audio-capture': 'mic_not_found',
+  }
+
+  function normalizeMediaError(error) {
+    if (error && typeof error === 'object') {
+      var code = MEDIA_ERROR_CODES[text(error.name)]
+      if (code) {
+        // DOMException exposes `code` as a read-only getter, so mutating the
+        // original error in place throws. Carry the stable code on a fresh
+        // plain Error instead; consumers map error.code to their own language.
+        var normalized = new Error(MEDIA_ERROR_MESSAGES[code])
+        normalized.name = 'MediaError'
+        normalized.code = code
+        return normalized
+      }
+    }
+    return error
+  }
+
+  function normalizeRecognitionError(error) {
+    var raw = text(error && error.error || error)
+    var mapped = RECOGNITION_ERROR_CODES[raw]
+    return {
+      code: mapped || raw,
+      message: mapped ? MEDIA_ERROR_MESSAGES[mapped] : text(error && error.message || error),
+    }
   }
 
   function emitter() {
@@ -59,6 +141,9 @@
       return transcriptEvent('output', event.delta, false)
     }
     if (type === 'response.audio.done' || type === 'response.output_audio.done' || type === 'response.done') return { type: 'phase', phase: 'listening' }
+    if (type === 'conversation.item.input_audio_transcription.started' || type === 'conversation.item.input_audio_transcription.delta') {
+      return transcriptEvent('input', event.delta !== undefined ? event.delta : event.transcript, false)
+    }
     if (type === 'conversation.item.input_audio_transcription.completed') return transcriptEvent('input', event.transcript, true)
     if (type === 'response.audio_transcript.done' || type === 'response.output_audio_transcript.done' || type === 'response.output_text.done' || type === 'response.text.done') {
       return transcriptEvent('output', event.transcript || event.text, true)
@@ -104,6 +189,11 @@
     if (this.closed) return
     if (!this.hasSubscriber && this.pendingEvents.length < 16) this.pendingEvents.push(event)
     this.events.emit(event)
+    // Dual output: the runtime resolves registered tool calls itself (async
+    // results included) so product layers only register executors. Consumers
+    // without a matching registry keep the legacy behavior of resolving tools
+    // through the handle themselves.
+    if (event && event.type === 'tool' && this.service) this.service.dispatchTool(this, event)
   }
   RealtimeHandle.prototype.guard = function (callback) {
     var self = this
@@ -146,9 +236,11 @@
 
   async function openOpenAI(service, options) {
     var handle = service.track(new RealtimeHandle('openai-webrtc'))
+    handle.ownerId = text(options.ownerId)
     handle.emit({ type: 'phase', phase: 'connecting' })
     try {
       var outputOnly = options.outputOnly === true
+      if (!outputOnly) handle.own(service.acquireInput(options.ownerId))
       var stream = outputOnly ? null : await service.root.navigator.mediaDevices.getUserMedia({ audio: true })
       if (handle.closed) { if (stream) stream.getTracks().forEach(function (track) { track.stop() }); return handle }
       if (stream) handle.own(function () { stream.getTracks().forEach(function (track) { track.stop() }) })
@@ -179,6 +271,8 @@
         if (event.type === 'response.create') return jsonSend(channel, { type: 'response.create' })
         return jsonSend(channel, event)
       }
+      var openAISend = handle.send
+      handle.send = function (event) { voiceLog('upstream', event.type + (event.call_id ? ':' + event.call_id : '')); return openAISend(event) }
       channel.onopen = handle.guard(function () {
         handle.emit({ type: 'status', connected: true, status: 'ready' })
         handle.emit({ type: 'phase', phase: options.previewText ? 'thinking' : 'listening' })
@@ -187,7 +281,13 @@
           jsonSend(channel, { type: 'response.create' })
         }
       })
-      channel.onmessage = handle.guard(function (message) { try { openAIEvent(handle, JSON.parse(message.data)) } catch (_) {} })
+      channel.onmessage = handle.guard(function (message) {
+        try {
+          var event = JSON.parse(message.data)
+          voiceLog('downstream', 'openai:' + event.type)
+          openAIEvent(handle, event)
+        } catch (_) {}
+      })
       channel.onerror = handle.guard(function () { handle.emit(errorEvent('data_channel_error', 'OpenAI Realtime data channel failed', true)) })
       var offer = await peer.createOffer()
       await peer.setLocalDescription(offer)
@@ -202,7 +302,7 @@
       return handle
     } catch (error) {
       handle.close()
-      throw error
+      throw normalizeMediaError(error)
     }
   }
 
@@ -254,9 +354,11 @@
 
   async function openDoubao(service, options) {
     var handle = service.track(new RealtimeHandle('doubao-realtime-duplex'))
+    handle.ownerId = text(options.ownerId)
     handle.emit({ type: 'phase', phase: 'connecting' })
     try {
       var outputOnly = options.outputOnly === true
+      if (!outputOnly) handle.own(service.acquireInput(options.ownerId))
       var stream = outputOnly ? null : await service.root.navigator.mediaDevices.getUserMedia({ audio: true })
       if (stream) handle.own(function () { stream.getTracks().forEach(function (track) { track.stop() }) })
       var AudioContext = service.root.AudioContext || service.root.webkitAudioContext
@@ -273,14 +375,29 @@
       handle.own(handle.cancelPlayback)
       var wsProtocol = service.root.location.protocol === 'https:' ? 'wss:' : 'ws:'
       var socket = new service.root.WebSocket(wsProtocol + '//' + service.root.location.host + service.basePath + '/doubao', WS_PROTOCOL)
-      handle.send = function (event) { jsonSend(socket, event) }
+      handle.send = function (event) {
+        // Doubao Duplex resumes the turn automatically after a function-call
+        // result (the official SDK sends no response.create); forwarding the
+        // OpenAI-only trigger is not part of this dialect and can leave the
+        // model waiting on a stale event instead of speaking the follow-up.
+        if (event.type === 'response.create') return
+        voiceLog('upstream', event.type + (event.call_id ? ':' + event.call_id : ''))
+        jsonSend(socket, event)
+      }
       handle.own(function () { socket.close(1000, 'client closed') })
       socket.onopen = handle.guard(function () {
+        voiceLog('upstream', 'session.start')
         jsonSend(socket, { type: 'session.start', routeId: options.routeId, profileId: options.profileId, context: options.context })
       })
       socket.onmessage = handle.guard(function (message) {
         var event
         try { event = JSON.parse(message.data) } catch (_) { return }
+        if (event.type === 'error') {
+          var detail = object(event.error)
+          voiceLog('downstream', 'error ' + (text(detail.code) || 'unknown') + ' ' + text(detail.message))
+        } else {
+          voiceLog('downstream', event.type)
+        }
         if (event.type === 'session.ready') {
           handle.emit({ type: 'status', connected: true, status: 'ready' })
           handle.emit({ type: 'phase', phase: options.previewText ? 'thinking' : 'listening' })
@@ -307,19 +424,28 @@
       return handle
     } catch (error) {
       handle.close()
-      throw error
+      throw normalizeMediaError(error)
     }
   }
 
   function browserRecognition(service, options) {
     var Recognition = service.root.SpeechRecognition || service.root.webkitSpeechRecognition
     if (!Recognition) throw new Error('SpeechRecognition is not available')
-    var recognition = new Recognition()
+    var handle
+    var releaseInput = service.acquireInput(options.ownerId, {
+      preemptible: options.preemptible === true,
+      onPreempt: function () {
+        if (handle) handle.close()
+        if (typeof options.onPreempt === 'function') options.onPreempt()
+      },
+    })
+    var recognition
+    try { recognition = new Recognition() } catch (error) { releaseInput(); throw error }
     var closed = false
     recognition.lang = options.lang || 'en-US'
     recognition.continuous = options.continuous !== false
     recognition.interimResults = options.interim !== false
-    var handle = {
+    handle = {
       close: function () {
         if (closed) return
         closed = true
@@ -327,6 +453,7 @@
         recognition.onerror = null
         recognition.onend = null
         service.auxiliary.delete(handle)
+        releaseInput()
         try { recognition.stop() } catch (_) {}
       },
     }
@@ -337,8 +464,29 @@
         if (typeof options.onTranscript === 'function') options.onTranscript({ text: text(result[0] && result[0].transcript), final: !!result.isFinal, resultIndex: i })
       }
     }
-    recognition.onerror = function (event) { if (!closed && typeof options.onError === 'function') options.onError(errorEvent(event.error, event.message || event.error, event.error === 'no-speech')) }
-    recognition.onend = function () { if (!closed) handle.close() }
+    recognition.onerror = function (event) {
+      if (closed || typeof options.onError !== 'function') return
+      var normalized = normalizeRecognitionError(event)
+      options.onError(errorEvent(normalized.code, normalized.message, event.error === 'no-speech'))
+    }
+    recognition.onend = function () {
+      if (closed) return
+      // Chrome/Edge end continuous recognition silently after an idle spell;
+      // a standby wake-word listener must come right back or the wake word
+      // quietly stops working. Restart unless the consumer preempted/closed us.
+      if (options.continuous !== false) {
+        var restart = function () {
+          if (closed) return
+          try { recognition.start() } catch (error) {
+            options.onError(errorEvent('recognition_restart_failed', text(error && error.message || error), true))
+          }
+        }
+        if (typeof service.root.setTimeout === 'function') service.root.setTimeout(restart, 0)
+        else restart()
+        return
+      }
+      handle.close()
+    }
     service.auxiliary.add(handle)
     try { recognition.start() } catch (error) { handle.close(); throw error }
     return handle
@@ -385,6 +533,8 @@
     self.basePath = options && options.basePath || BASE_PATH
     self.handles = new Set()
     self.auxiliary = new Set()
+    self.inputLease = null
+    self.toolRegistries = []
     self.generation = 1
     return self
   }
@@ -403,6 +553,7 @@
         'doubao-realtime-duplex': media && typeof this.root.WebSocket === 'function' && !!(this.root.AudioContext || this.root.webkitAudioContext),
       },
       recognition: !!(this.root.SpeechRecognition || this.root.webkitSpeechRecognition),
+      audioInput: { exclusive: true, busy: !!this.inputLease, ownerId: this.inputLease ? this.inputLease.ownerId : '' },
       readAloud: !!this.root.speechSynthesis,
       voices: voices,
     }
@@ -413,9 +564,27 @@
     if (!response.ok) throw new Error(text(body.error) || 'Unable to list Realtime voice models')
     return Array.isArray(body.models) ? body.models : []
   }
+  RealtimeVoiceService.prototype.acquireInput = function (ownerId, options) {
+    var service = this
+    var normalized = text(ownerId).trim().slice(0, 120) || 'legacy-consumer'
+    if (this.inputLease && this.inputLease.preemptible) {
+      try { this.inputLease.onPreempt() } catch (_) {}
+    }
+    if (this.inputLease) throw inputBusyError(this.inputLease.ownerId)
+    options = object(options)
+    var lease = { ownerId: normalized, preemptible: options.preemptible === true, onPreempt: typeof options.onPreempt === 'function' ? options.onPreempt : function () {} }
+    this.inputLease = lease
+    var released = false
+    return function () {
+      if (released) return
+      released = true
+      if (service.inputLease === lease) service.inputLease = null
+    }
+  }
   RealtimeVoiceService.prototype.track = function (handle) {
     var self = this
     this.handles.add(handle)
+    handle.service = self
     var close = handle.close.bind(handle)
     handle.close = function () { close(); self.handles.delete(handle) }
     return handle
@@ -428,12 +597,150 @@
   }
   RealtimeVoiceService.prototype.recognize = function (options) { return browserRecognition(this, object(options)) }
   RealtimeVoiceService.prototype.readAloud = function (options) { return browserReadAloud(this, object(options)) }
+
+  /**
+   * Register tool executors for one audio-input owner prefix. Handles whose
+   * ownerId starts with the prefix resolve their tool events through these
+   * executors automatically (async results included); the model keeps
+   * speaking while a result is pending (dual output). Consumers without a
+   * matching registry keep resolving tool events themselves.
+   */
+  RealtimeVoiceService.prototype.registerTools = function (ownerPrefix, tools) {
+    var prefix = text(ownerPrefix)
+    if (!prefix) throw new TypeError('ownerPrefix is required')
+    if (!tools || typeof tools !== 'object' || Array.isArray(tools)) throw new TypeError('tools must be an object of executors')
+    var normalized = {}
+    Object.keys(tools).forEach(function (name) {
+      var tool = object(tools[name])
+      if (typeof tool.execute !== 'function') throw new TypeError('tool ' + name + ' must provide an execute function')
+      normalized[name] = tool
+    })
+    var entry = { ownerPrefix: prefix, tools: normalized }
+    this.toolRegistries.push(entry)
+    var self = this
+    return {
+      dispose: function () {
+        var index = self.toolRegistries.indexOf(entry)
+        if (index >= 0) self.toolRegistries.splice(index, 1)
+      },
+    }
+  }
+
+  /** Merged executor map for a handle owner; later registrations win on name conflicts. */
+  RealtimeVoiceService.prototype.lookupTools = function (ownerId) {
+    var merged = null
+    for (var i = this.toolRegistries.length - 1; i >= 0; i -= 1) {
+      var entry = this.toolRegistries[i]
+      if (ownerId && ownerId.indexOf(entry.ownerPrefix) === 0) {
+        if (!merged) merged = {}
+        var tools = entry.tools
+        for (var name in tools) merged[name] = tools[name]
+      }
+    }
+    return merged
+  }
+
+  /**
+   * Bound strings inside a tool result for the observable tool-result event:
+   * subscribers only need the outcome shape, not the full 24k draft payload.
+   */
+  function boundedResult(value, max) {
+    max = max || 4000
+    if (typeof value === 'string') return value.length > max ? value.slice(0, max) + '…' : value
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      var out = {}
+      for (var key in value) out[key] = boundedResult(value[key], max)
+      return out
+    }
+    return value
+  }
+
+  /**
+   * Resolve one tool result back to the provider. Returns whether the result
+   * was actually delivered, and emits a normalized tool-result event so
+   * product layers can observe the outcome of the dual output channel.
+   */
+  RealtimeVoiceService.prototype.settleTool = function (handle, event, result, options) {
+    try {
+      handle.resolveTool(event.callId, result, options)
+      handle.emit({ type: 'tool-result', callId: event.callId, name: event.name, ok: true, output: boundedResult(result) })
+      return true
+    } catch (error) {
+      handle.emit({ type: 'tool-result', callId: event.callId, name: event.name, ok: false, error: errorMessage(error) })
+      return false
+    }
+  }
+
+  /**
+   * Execute a normalized tool event through the owner-matched registry. The
+   * executor may return a plain value, a Promise, or call control.resolve
+   * itself when it must settle the result before running follow-up work.
+   */
+  RealtimeVoiceService.prototype.dispatchTool = function (handle, event) {
+    var tools = this.lookupTools(handle.ownerId)
+    if (!tools) return
+    var executor = tools[event.name]
+    if (typeof executor !== 'object' || typeof executor.execute !== 'function') {
+      this.settleTool(handle, event, { ok: false, error: 'Unknown tool: ' + text(event.name) })
+      return
+    }
+    var args = parseToolArguments(event.arguments)
+    if (args === undefined) {
+      this.settleTool(handle, event, { ok: false, error: 'Invalid tool arguments.' })
+      return
+    }
+    var self = this
+    var resolved = false
+    // Defensive timeout for async executors: a hanging executor must never
+    // leave the voice model waiting on its tool result forever. Per-tool
+    // timeoutMs overrides the default; no timer is armed for synchronous
+    // executors that settle within the same tick.
+    var timeoutMs = Number.isFinite(executor.timeoutMs) && executor.timeoutMs > 0 ? executor.timeoutMs : DEFAULT_TOOL_TIMEOUT_MS
+    var timer = null
+    if (timeoutMs > 0) {
+      timer = setTimeout(function () {
+        if (!resolved && !handle.closed) control.resolve({ ok: false, error: 'Tool execution timed out.' })
+      }, timeoutMs)
+      if (typeof handle.own === 'function') handle.own(function () { clearTimeout(timer) })
+    }
+    var control = {
+      resolve: function (result, options) {
+        if (resolved || handle.closed) return false
+        resolved = true
+        if (timer !== null) clearTimeout(timer)
+        return self.settleTool(handle, event, result, options)
+      },
+    }
+    var outcome
+    try {
+      outcome = executor.execute(args, control)
+    } catch (error) {
+      if (timer !== null) clearTimeout(timer)
+      if (!resolved) this.settleTool(handle, event, { ok: false, error: errorMessage(error) })
+      return
+    }
+    if (outcome && typeof outcome.then === 'function') {
+      Promise.resolve(outcome).then(
+        function (value) {
+          if (!resolved && !handle.closed) control.resolve(value === undefined ? { ok: true } : value)
+        },
+        function (error) {
+          if (!resolved && !handle.closed) control.resolve({ ok: false, error: errorMessage(error) })
+        },
+      )
+      return
+    }
+    if (!resolved) control.resolve(outcome === undefined ? { ok: true } : outcome)
+  }
+
   RealtimeVoiceService.prototype.dispose = function () {
     this.generation += 1
     this.handles.forEach(function (handle) { handle.close() })
     this.auxiliary.forEach(function (handle) { handle.close() })
     this.handles.clear()
     this.auxiliary.clear()
+    this.inputLease = null
+    this.toolRegistries.length = 0
   }
 
   function apply(ctx) {
@@ -447,6 +754,7 @@
   exports.RealtimeVoiceService = RealtimeVoiceService
   exports.RealtimeHandle = RealtimeHandle
   exports.normalizeProviderEvent = normalizeProviderEvent
+  exports.normalizeMediaError = normalizeMediaError
   exports.REALTIME_WS_PROTOCOL = WS_PROTOCOL
   module.exports = exports
 })

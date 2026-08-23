@@ -40,6 +40,14 @@ export const doubaoRealtimeAdapter = {
         },
         tools: Array.isArray(profile.tools) ? profile.tools : [],
       },
+      // extension is a TOP-LEVEL field of session.create/update (per the
+      // official duplex SDK), not a session member. Enables input ASR so the
+      // browser receives streaming input_audio_transcription events.
+      extension: {
+        asr: {
+          audio_info: { format: 'pcm', sample_rate: 16000, channel: 1 },
+        },
+      },
     }
   },
 }

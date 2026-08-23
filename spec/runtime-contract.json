@@ -1,34 +1,126 @@
 {
-  "version": 2,
-  "name": "realtime-voice-provider-transport",
+  "version": 4,
+  "name": "realtime-voice-provider-runtime",
   "runtime": "dsh-multi-model-provider/realtimeModelRuntime",
   "route": {
-    "required": ["id", "model", "provider", "protocol", "adapter"],
-    "protocols": ["openai-webrtc", "doubao-realtime-duplex"],
+    "required": [
+      "id",
+      "model",
+      "provider",
+      "protocol",
+      "adapter"
+    ],
+    "protocols": [
+      "openai-webrtc",
+      "doubao-realtime-duplex"
+    ],
     "trustedOrigins": {
-      "openai-webrtc": ["https://api.openai.com"],
-      "doubao-realtime-duplex": ["wss://openspeech.bytedance.com"]
+      "openai-webrtc": [
+        "https://api.openai.com"
+      ],
+      "doubao-realtime-duplex": [
+        "wss://openspeech.bytedance.com"
+      ]
     },
     "browserAuthorization": {
-      "httpMarkers": ["x-dsh-realtime-voice", "x-dsh-model-probe"],
+      "httpMarkers": [
+        "x-dsh-realtime-voice",
+        "x-dsh-model-probe"
+      ],
       "websocketSubprotocol": "dsh-realtime-voice-v1",
       "sameOrigin": true
     }
   },
   "clientService": {
     "name": "realtimeVoice",
-    "methods": ["capabilities", "models", "open", "recognize", "readAloud"],
-    "capabilities": ["secureContext", "realtime", "recognition", "readAloud", "voices"],
-    "handle": ["id", "subscribe", "updateContext", "resolveTool", "interrupt", "close"],
+    "methods": [
+      "capabilities",
+      "models",
+      "open",
+      "recognize",
+      "readAloud",
+      "registerTools"
+    ],
+    "capabilities": [
+      "secureContext",
+      "realtime",
+      "recognition",
+      "audioInput",
+      "readAloud",
+      "voices"
+    ],
+    "audioInput": {
+      "ownership": "exclusive-lease",
+      "ownerOption": "ownerId",
+      "conflictCode": "audio_input_busy",
+      "standbyPreemption": "recognize-preemptible",
+      "release": "handle-close-or-startup-failure"
+    },
+    "toolRegistry": {
+      "registration": "registerTools(ownerPrefix, tools)",
+      "ownerMatch": "handle ownerId startsWith ownerPrefix",
+      "resolution": "registered name → execute(args, control) → resolveTool; unknown name under a matched owner → error result; unmatched owner → consumer resolves",
+      "asyncResults": "execute may return a Promise; speech continues while the result is pending (dual output); executors that never settle are resolved with a timeout error (tool.timeoutMs per tool, default 300000ms)",
+      "control": "execute may call control.resolve(result, options) to settle before follow-up work",
+      "events": "tool-result emitted after every automatic resolution"
+    },
+    "handle": [
+      "id",
+      "subscribe",
+      "updateContext",
+      "resolveTool",
+      "interrupt",
+      "close"
+    ],
     "events": {
-      "status": ["connected", "status"],
-      "phase": ["phase"],
-      "transcript": ["role", "text", "final"],
-      "tool": ["callId", "name", "arguments"],
-      "error": ["code", "message", "recoverable"],
+      "status": [
+        "connected",
+        "status"
+      ],
+      "phase": [
+        "phase"
+      ],
+      "transcript": [
+        "role",
+        "text",
+        "final"
+      ],
+      "tool": [
+        "callId",
+        "name",
+        "arguments"
+      ],
+      "tool-result": [
+        "callId",
+        "name",
+        "ok",
+        "output",
+        "error"
+      ],
+      "error": [
+        "code",
+        "message",
+        "recoverable"
+      ],
       "closed": []
     }
   },
-  "owns": ["provider-wire-protocol", "browser-transport", "browser-media-lifecycle", "provider-event-normalization"],
-  "doesNotOwn": ["model-catalog", "credential-resolution", "role-profile", "drafts", "agent-submission"]
+  "owns": [
+    "provider-wire-protocol",
+    "browser-transport",
+    "browser-media-lifecycle",
+    "audio-input-arbitration",
+    "provider-event-normalization",
+    "tool-execution-loop",
+    "dual-output-scheduling"
+  ],
+  "doesNotOwn": [
+    "model-catalog",
+    "credential-resolution",
+    "role-profile",
+    "drafts",
+    "agent-submission",
+    "knowledge",
+    "delegation-policy"
+  ]
 }

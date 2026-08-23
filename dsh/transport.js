@@ -20,6 +20,11 @@ function object(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
+/** Host-side event-flow trace for the Realtime bridge; lands in the process log (web-nohup.log). */
+function trace(...args) {
+  try { console.log('[realtime-voice:host]', ...args) } catch { /* never break the bridge */ }
+}
+
 function string(value, max = MAX_TEXT_CHARS) {
   if (typeof value !== 'string') return undefined
   return value.length <= max ? value : value.slice(0, max)
@@ -309,13 +314,26 @@ export function safeUpstreamEvent(message, state, service) {
 }
 
 function toolEvent(message, state) {
-  const callID = string(message.call_id, 240)
-  const name = string(message.name, 240)
-  const args = string(message.arguments ?? message.arguments_delta ?? '', MAX_TEXT_CHARS)
-  if (!callID || !name || args === undefined) return null
-  if (state.pendingToolCalls.has(callID)) return null
-  state.pendingToolCalls.add(callID)
-  return { type: message.type, call_id: callID, name, arguments: args }
+  // Doubao Duplex delivers function calls inside an `items` array:
+  //   { type: 'response.function_call_arguments.done', items: [{ call_id, name, arguments }] }
+  // OpenAI delivers them flat:
+  //   { type: 'response.function_call_arguments.done', call_id, name, arguments }
+  // Accept both; each item becomes one normalized tool event (or null when empty/duplicate).
+  const raw = Array.isArray(message.items) && message.items.length > 0
+    ? message.items
+    : message.call_id !== undefined ? [message] : []
+  const events = []
+  for (const item of raw) {
+    const callID = string(item.call_id, 240)
+    const name = string(item.name, 240)
+    const args = string(item.arguments ?? item.arguments_delta ?? '', MAX_TEXT_CHARS)
+    if (!callID || !name || args === undefined) continue
+    if (state.pendingToolCalls.has(callID)) continue
+    state.pendingToolCalls.add(callID)
+    events.push({ type: message.type, call_id: callID, name, arguments: args })
+  }
+  if (events.length === 0) return null
+  return events.length === 1 ? events[0] : events
 }
 
 export function sanitizeProviderEvent(message, state) {
@@ -339,9 +357,11 @@ export function sanitizeProviderEvent(message, state) {
       const delta = string(message.delta, MAX_AUDIO_BASE64_CHARS)
       return delta && validPCMBase64(delta) ? { type: message.type, delta } : null
     }
+    case 'conversation.item.input_audio_transcription.started':
+    case 'conversation.item.input_audio_transcription.delta':
     case 'conversation.item.input_audio_transcription.completed': {
-      const transcript = string(message.transcript)
-      return transcript === undefined ? null : { type: message.type, transcript }
+      const transcript = string(message.delta ?? message.transcript)
+      return transcript === undefined || transcript === '' ? null : { type: message.type, ...(message.type.endsWith('.completed') ? { transcript } : { delta: transcript }) }
     }
     case 'response.audio_transcript.delta':
     case 'response.audio_transcript.done':
@@ -409,9 +429,15 @@ function registerDoubaoUpgrade(scope, service, path, policy) {
         const sendUpstream = message => {
           if (!upstream || upstream.readyState !== WebSocket.OPEN) throw new Error('Doubao Realtime upstream is not connected')
           const outgoing = safeUpstreamEvent(message, state, service)
-          if (!Array.isArray(outgoing)) return upstream.send(JSON.stringify(outgoing))
+          if (!Array.isArray(outgoing)) {
+            trace('browser→upstream', outgoing.type + (outgoing.call_id ? ':' + outgoing.call_id : ''))
+            return upstream.send(JSON.stringify(outgoing))
+          }
           outgoing.forEach((event, index) => setTimeout(() => {
-            if (upstream?.readyState === WebSocket.OPEN) upstream.send(JSON.stringify(event))
+            if (upstream?.readyState === WebSocket.OPEN) {
+              trace('browser→upstream', event.type)
+              upstream.send(JSON.stringify(event))
+            }
           }, index * 100))
         }
         const begin = async message => {
@@ -424,12 +450,16 @@ function registerDoubaoUpgrade(scope, service, path, policy) {
             if (!credential.value) throw new Error(`DSH host 未配置 ${credential.credentialRef || 'DOUBAO_API_KEY'}`)
             const initial = service.session({ profileId, route, context: message.context })
             state = { id: initial.session.id, profileId, route, pendingToolCalls: new Set() }
+            trace('session.start profile=' + profileId + ' route=' + route.model + ' tools=' + (Array.isArray(initial.session.tools) ? initial.session.tools.length : 0) + ' ext=' + JSON.stringify(initial.extension || null))
             upstream = new WebSocket(route.endpoint, {
               headers: { 'X-Api-Key': credential.value },
               handshakeTimeout: 20_000,
               maxPayload: MAX_PROVIDER_FRAME_BYTES,
             })
-            upstream.on('open', () => upstream.send(JSON.stringify({ type: 'session.create', event_id: randomUUID(), ...initial })))
+            upstream.on('open', () => {
+              trace('upstream session.create model=' + route.model)
+              upstream.send(JSON.stringify({ type: 'session.create', event_id: randomUUID(), ...initial }))
+            })
             upstream.on('message', (payload, binary) => {
               if (browser.readyState !== WebSocket.OPEN) return
               let message
@@ -438,20 +468,28 @@ function registerDoubaoUpgrade(scope, service, path, policy) {
                 return closeBoth(1009, 'invalid upstream frame')
               }
               const event = sanitizeProviderEvent(message, state)
-              if (!event) return
-              if (event.type === 'session.created') {
-                started = true
-                starting = false
-                state.id = String(event.session.id || state.id)
-                browser.send(JSON.stringify(event))
-                browser.send(JSON.stringify({ type: 'session.ready', session: { id: state.id } }))
-                try { queue.flush(sendUpstream) } catch (error) {
-                  localError(browser, error?.message || error)
-                  closeBoth(1011, 'startup queue failed')
-                }
+              if (!event) {
+                trace('upstream→browser dropped', String(message.type || 'unknown'))
                 return
               }
-              browser.send(JSON.stringify(event))
+              const events = Array.isArray(event) ? event : [event]
+              for (const single of events) {
+                if (single.type === 'error') trace('upstream→browser error', single.error?.code || 'unknown', String(single.error?.message || '').slice(0, 300))
+                else trace('upstream→browser', single.type)
+                if (single.type === 'session.created') {
+                  started = true
+                  starting = false
+                  state.id = String(single.session.id || state.id)
+                  browser.send(JSON.stringify(single))
+                  browser.send(JSON.stringify({ type: 'session.ready', session: { id: state.id } }))
+                  try { queue.flush(sendUpstream) } catch (error) {
+                    localError(browser, error?.message || error)
+                    closeBoth(1011, 'startup queue failed')
+                  }
+                  return
+                }
+                browser.send(JSON.stringify(single))
+              }
             })
             upstream.on('unexpected-response', (_request, response) => {
               void describeUnexpectedResponse(response).then(

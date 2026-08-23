@@ -1,6 +1,6 @@
 # dsh-realtime-voice
 
-Provider-neutral Realtime voice transport for DeepSeek Harness. `dsh-multi-model-provider` owns the model catalog, route selection, credential references, and profile registry. Product plugins own role profiles, context shaping, and tool policy. This plugin owns OpenAI Realtime and Doubao Duplex wire protocols plus browser media lifecycle.
+Provider-neutral Realtime voice runtime for DeepSeek Harness. `dsh-multi-model-provider` owns the model catalog, route selection, credential references, and profile registry. Product plugins own role profiles, context shaping, and tool policy. This plugin owns the OpenAI Realtime and Doubao Duplex wire protocols, the browser media lifecycle, and the neutral session runtime: the tool-execution loop with async results (dual output) that product layers parameterize.
 
 ## Host responsibilities
 
@@ -40,10 +40,11 @@ const dispose = session.subscribe(event => {
 
 Service contract:
 
-- `capabilities()` returns secure-context state, per-protocol browser support, recognition/read-aloud support, and installed browser voices.
+- `capabilities()` returns secure-context state, per-protocol browser support, recognition/read-aloud support, the current exclusive audio-input lease state, and installed browser voices.
 - `models()`
-- `open({ protocol, routeId, profileId, context })`
-- `recognize({ lang, continuous, interim, onTranscript, onError })`
+- `open({ protocol, routeId, profileId, context, ownerId })`
+- `registerTools(ownerPrefix, tools)` registers tool executors for one audio-input owner prefix and returns `{ dispose() }`. Handles whose `ownerId` starts with the prefix resolve their tool events through these executors automatically; the model keeps speaking while an async result is pending (dual output). The executor may return a plain value, a Promise, or call `control.resolve(result, options)` itself when it must settle the result before running follow-up work. Async executors that never settle are resolved with a timeout error (`tool.timeoutMs` per tool, default 5 minutes) so the model is never left waiting forever. Every automatic resolution emits a normalized `tool-result` event whose `ok` means the result was delivered (the executor outcome is in `output`). Consumers without a matching registry keep resolving tool events themselves (legacy behavior).
+- `recognize({ lang, continuous, interim, ownerId, onTranscript, onError })`
 - `readAloud({ text, voiceName, lang, rate, onEnd, onError })`
 
 For a settings-page voice preview, `open()` also accepts `outputOnly: true` and a bounded `previewText`. This establishes a receive-only session and never opens the microphone. OpenAI receives a one-turn text request. The deployed Doubao Dialogue dialect does not accept that text event, so the Host streams a short bundled 16 kHz PCM prompt at realtime cadence and commits it; the selected model then answers with its actual configured voice. The caller must subscribe immediately and close the handle after the response completes, fails, or times out.
@@ -57,8 +58,12 @@ Realtime handle contract:
 - `interrupt()`
 - `close()`
 
-The Client service owns `RTCPeerConnection`, data channels, microphone tracks, media/audio elements, WebSockets, `AudioContext`, PCM capture and playback, `SpeechRecognition`, `speechSynthesis`, listeners, and late-callback guards. It does not know drafts, Agent submission, or any session-assistant business semantics.
+The Client service owns `RTCPeerConnection`, data channels, microphone tracks, media/audio elements, WebSockets, `AudioContext`, PCM capture and playback, `SpeechRecognition`, `speechSynthesis`, listeners, late-callback guards, and the neutral tool-execution loop. It does not know drafts, Agent submission, knowledge bases, pets, or any product business semantics.
+
+Every microphone or browser-recognition consumer supplies a bounded `ownerId`. Audio input is an exclusive lease: a competing `open()` or `recognize()` fails with `code: "audio_input_busy"` and the current owner id. A low-priority standby recognizer may set `preemptible: true`; an active assistant then closes that recognizer before claiming the lease. Closing a handle or failing during startup releases the lease. Receive-only preview and speech synthesis never acquire it.
+
+Browser media failures are normalized to stable, consumer-localizable codes on the rejected error (and on `recognize()` error events): `mic_not_found` (no input device), `mic_permission_denied`, `mic_unreadable`, and `mic_aborted`. The raw DOMException message is replaced with one canonical English sentence per code; consumers translate `error.code` into their own language and fall back to the message for unknown codes.
 
 ## Runtime integration
 
-Business plugins register profiles with `realtimeModelRuntime` and pass only their profile id, selected route id, and provider-neutral context to `realtimeVoice`. They must resolve normalized `tool` events through the handle; they never supply credentials or arbitrary provider events.
+Business plugins register profiles with `realtimeModelRuntime` and pass only their profile id, selected route id, and provider-neutral context to `realtimeVoice`. They register tool executors with `registerTools` under their audio-input owner prefix; the runtime executes and settles tool events (dual output: speech continues while async results are pending). They never supply credentials or arbitrary provider events, and the runtime never sees tasks, drafts, or submission policy.

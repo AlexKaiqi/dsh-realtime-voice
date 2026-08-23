@@ -34,4 +34,7 @@ test('assembles a Doubao Duplex session without owning model discovery or creden
   assert.equal(result.session.audio.output.voice, 'doubao-voice')
   assert.deepEqual(result.session.tools.map(tool => tool.name), ['submit_to_agent'])
   assert.ok(result.session.id)
+  // ASR extension is a TOP-LEVEL field of session.create, not a session member.
+  assert.equal(result.session.extension, undefined)
+  assert.deepEqual(result.extension, { asr: { audio_info: { format: 'pcm', sample_rate: 16000, channel: 1 } } })
 })

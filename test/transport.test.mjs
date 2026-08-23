@@ -80,6 +80,36 @@ test('whitelists Doubao provider events and strips diagnostic blobs', () => {
   assert.equal(sanitizeProviderEvent({ type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'submit', arguments: '{}', replay: true }, state), null)
 })
 
+test('accepts Doubao function calls delivered inside an items array', () => {
+  const state = { pendingToolCalls: new Set() }
+  // Doubao Duplex shape: { type, items: [{ call_id, name, arguments }] }
+  assert.deepEqual(sanitizeProviderEvent({ type: 'response.function_call_arguments.done', items: [{ call_id: 'call-d1', name: 'submit_to_agent', arguments: '{"draft":"hello"}' }] }, state), {
+    type: 'response.function_call_arguments.done', call_id: 'call-d1', name: 'submit_to_agent', arguments: '{"draft":"hello"}',
+  })
+  assert.equal(state.pendingToolCalls.has('call-d1'), true)
+  // Multiple calls in one event expand to an array.
+  const multi = sanitizeProviderEvent({ type: 'response.function_call_arguments.done', items: [{ call_id: 'a', name: 'update_working_draft', arguments: '{}' }, { call_id: 'b', name: 'submit_to_agent', arguments: '{}' }] }, state)
+  assert.deepEqual(multi, [
+    { type: 'response.function_call_arguments.done', call_id: 'a', name: 'update_working_draft', arguments: '{}' },
+    { type: 'response.function_call_arguments.done', call_id: 'b', name: 'submit_to_agent', arguments: '{}' },
+  ])
+  assert.equal(state.pendingToolCalls.has('a'), true)
+  assert.equal(state.pendingToolCalls.has('b'), true)
+  // Duplicate call_id inside the array is dropped.
+  assert.equal(sanitizeProviderEvent({ type: 'response.function_call_arguments.done', items: [{ call_id: 'a', name: 'update_working_draft', arguments: '{}' }] }, state), null)
+  // Malformed items are dropped, never forwarded.
+  assert.equal(sanitizeProviderEvent({ type: 'response.function_call_arguments.done', items: [{ call_id: '', name: 'x', arguments: '{}' }] }, state), null)
+})
+
+test('forwards streaming input transcription for live transcript display', () => {
+  const state = { pendingToolCalls: new Set() }
+  assert.deepEqual(sanitizeProviderEvent({ type: 'conversation.item.input_audio_transcription.started', delta: '你', item_id: 'i1' }, state), { type: 'conversation.item.input_audio_transcription.started', delta: '你' })
+  assert.deepEqual(sanitizeProviderEvent({ type: 'conversation.item.input_audio_transcription.delta', delta: '你好', item_id: 'i1' }, state), { type: 'conversation.item.input_audio_transcription.delta', delta: '你好' })
+  assert.deepEqual(sanitizeProviderEvent({ type: 'conversation.item.input_audio_transcription.completed', transcript: '你好世界', item_id: 'i1' }, state), { type: 'conversation.item.input_audio_transcription.completed', transcript: '你好世界' })
+  assert.equal(sanitizeProviderEvent({ type: 'conversation.item.input_audio_transcription.delta', delta: '', item_id: 'i1' }, state), null)
+  assert.equal(sanitizeProviderEvent({ type: 'conversation.item.input_audio_transcription.failed', item_id: 'i1' }, state), null)
+})
+
 test('accepts exactly one result for each pending upstream tool call', () => {
   const state = {
     id: 'session-id',

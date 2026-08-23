@@ -1,6 +1,6 @@
 {
   "name": "dsh-realtime-voice",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Provider-neutral registered Realtime voice runtime for DeepSeek Harness assistants.",
   "type": "module",
   "main": "./dsh/index.js",
