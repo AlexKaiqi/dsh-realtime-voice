@@ -1,6 +1,6 @@
 (function (root, factory) {
   if (root && root.__ModuleLoader__) {
-    root.__ModuleLoader__.load({ id: 'dsh-voice-agent', factory: function (require) {
+    root.__ModuleLoader__.load({ id: 'dsh-realtime-voice', factory: function (require) {
       var module = { exports: {} }
       factory(module, module.exports, require, root)
       return module.exports
@@ -13,9 +13,9 @@
 
   var Cordis = require('@deepseek-ai/cordis')
   var Service = Cordis.Service
-  var BASE_PATH = '/dsh-voice-agent'
-  var MARKER = 'x-dsh-voice-agent'
-  var WS_PROTOCOL = 'dsh-voice-agent-v1'
+  var BASE_PATH = '/dsh-realtime-voice'
+  var MARKER = 'x-dsh-realtime-voice'
+  var WS_PROTOCOL = 'dsh-realtime-voice-v1'
   var protocols = Object.freeze(['openai-webrtc', 'doubao-realtime-duplex'])
   var nextHandleId = 1
   /** Defensive ceiling for async tool executors that never settle. */
@@ -59,7 +59,7 @@
   function voiceLog(direction, detail) {
     try {
       var sink = root.console || (typeof console !== 'undefined' ? console : null)
-      if (sink && typeof sink.log === 'function') sink.log('[voice-agent]', direction, detail)
+      if (sink && typeof sink.log === 'function') sink.log('[realtime-voice]', direction, detail)
     } catch (_) { /* logging must never break the voice loop */ }
   }
 
@@ -163,7 +163,7 @@
   }
 
   function VoiceConversation(protocol) {
-    this.id = 'voice-agent-' + nextHandleId++
+    this.id = 'realtime-voice-' + nextHandleId++
     this.protocol = protocol
     this.events = emitter()
     this.generation = 1
@@ -745,10 +745,10 @@
 
   function apply(ctx) {
     var service = new VoiceAgentService(ctx)
-    if (typeof ctx.effect === 'function') ctx.effect(function () { return function () { service.dispose() } }, 'dsh-voice-agent.client')
+    if (typeof ctx.effect === 'function') ctx.effect(function () { return function () { service.dispose() } }, 'dsh-realtime-voice.client')
   }
 
-  exports.name = 'dsh-voice-agent'
+  exports.name = 'dsh-realtime-voice'
   exports.inject = []
   exports.apply = apply
   exports.VoiceAgentService = VoiceAgentService

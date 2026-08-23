@@ -19,12 +19,13 @@ test('normalizes OpenAI-compatible base URLs without duplicating v1', () => {
 })
 
 test('requires same-origin Origin and Host plus marker and Sec-Fetch-Site when present', () => {
-  const valid = { headers: { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080', 'x-dsh-voice-agent': '1', 'sec-fetch-site': 'same-origin' } }
+  const valid = { headers: { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080', 'x-dsh-realtime-voice': '1', 'sec-fetch-site': 'same-origin' } }
   assert.equal(isSameOriginUpgrade(valid), true)
   assert.deepEqual(authorizeBrowserRequest(valid), { ok: true })
   assert.equal(authorizeBrowserRequest({ headers: { ...valid.headers, origin: 'https://evil.example' } }).ok, false)
   assert.equal(authorizeBrowserRequest({ headers: { ...valid.headers, 'sec-fetch-site': 'cross-site' } }).ok, false)
   assert.equal(authorizeBrowserRequest({ headers: { origin: valid.headers.origin, host: valid.headers.host } }).ok, false)
+  assert.deepEqual(authorizeBrowserRequest({ headers: { ...valid.headers, 'x-dsh-realtime-voice': undefined, 'x-dsh-voice-agent': '1' } }), { ok: true })
 })
 
 test('authorizes browser websocket upgrades through a real WebSocket subprotocol', () => {
@@ -37,6 +38,7 @@ test('authorizes browser websocket upgrades through a real WebSocket subprotocol
     },
   }
   assert.deepEqual(authorizeWebSocketRequest(valid), { ok: true })
+  assert.deepEqual(authorizeWebSocketRequest({ headers: { ...valid.headers, 'sec-websocket-protocol': 'dsh-voice-agent-v1' } }), { ok: true })
   assert.equal(authorizeWebSocketRequest({ headers: { ...valid.headers, 'sec-websocket-protocol': '' } }).ok, false)
   assert.equal(authorizeWebSocketRequest({ headers: { ...valid.headers, origin: 'https://evil.example' } }).ok, false)
 })

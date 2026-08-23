@@ -1,4 +1,4 @@
-# dsh-voice-agent
+# dsh-realtime-voice
 
 Provider-neutral full-duplex voice Agent capability for DeepSeek Harness.
 
@@ -24,16 +24,16 @@ The plugin does not create a second Agent, own long-term memory, or decide wheth
 - Defaults to official upstream origins: `https://api.openai.com` and `wss://openspeech.bytedance.com`.
 - Allows custom upstream origins only when explicitly listed in `trustedOpenAIOrigins` or `trustedDoubaoOrigins`.
 - Keeps long-lived credentials on the host and sends them only to validated upstreams.
-- Requires browser same-origin `Origin`/`Host`; billable POST routes use explicit marker headers, while the Doubao WebSocket uses the browser-compatible `dsh-voice-agent-v1` subprotocol. `Sec-Fetch-Site` must be `same-origin` when supplied.
+- Requires browser same-origin `Origin`/`Host`; billable POST routes use explicit marker headers, while the Doubao WebSocket uses the browser-compatible `dsh-realtime-voice-v1` subprotocol. `Sec-Fetch-Site` must be `same-origin` when supplied.
 - Bounds and sanitizes Doubao frames, buffers a small startup event queue, emits `session.ready`, and accepts one result for each pending tool call.
 - Owns every HTTP route, upgrade route, and WebSocket through Cordis lifecycle disposers.
 
-Host endpoints use the new product name. The old `/dsh-realtime-voice` paths, marker, and WebSocket subprotocol remain temporary compatibility aliases:
+The package and canonical Host endpoints retain the stable realtime-voice name. The short-lived `/dsh-voice-agent` paths, marker, and WebSocket subprotocol remain temporary compatibility aliases for the 0.3 development migration:
 
-- `GET /dsh-voice-agent/models`: public, non-billable model metadata.
-- `POST /dsh-voice-agent/openai/session`: same-origin OpenAI WebRTC SDP exchange; requires `x-dsh-voice-agent: 1`.
-- `POST /dsh-voice-agent/doubao/probe`: same-origin Doubao connection probe; requires `x-dsh-model-probe: 1`.
-- `WS /dsh-voice-agent/doubao`: same-origin Doubao Duplex proxy; requires WebSocket subprotocol `dsh-voice-agent-v1`.
+- `GET /dsh-realtime-voice/models`: public, non-billable model metadata.
+- `POST /dsh-realtime-voice/openai/session`: same-origin OpenAI WebRTC SDP exchange; requires `x-dsh-realtime-voice: 1`.
+- `POST /dsh-realtime-voice/doubao/probe`: same-origin Doubao connection probe; requires `x-dsh-model-probe: 1`.
+- `WS /dsh-realtime-voice/doubao`: same-origin Doubao Duplex proxy; requires WebSocket subprotocol `dsh-realtime-voice-v1`.
 
 ## Client service
 

@@ -1,9 +1,22 @@
 const assert = require('node:assert/strict')
+const { readFileSync } = require('node:fs')
 const test = require('node:test')
-const { REALTIME_WS_PROTOCOL, VoiceConversation, VoiceAgentService, normalizeProviderEvent, normalizeMediaError } = require('../client/client.js')
+const client = require('../client/client.js')
+const { REALTIME_WS_PROTOCOL, VoiceConversation, VoiceAgentService, normalizeProviderEvent, normalizeMediaError } = client
+
+test('keeps the stable realtime-voice package and Loader name while exposing voiceAgent', () => {
+  const pkg = require('../package.json')
+  const source = readFileSync(require.resolve('../client/client.js'), 'utf8')
+  assert.equal(pkg.name, 'dsh-realtime-voice')
+  assert.equal(client.name, 'dsh-realtime-voice')
+  assert.match(source, /load\(\{ id: 'dsh-realtime-voice'/)
+  const service = new VoiceAgentService({ reflect: { provide() {} } }, { root: {} })
+  assert.equal(service.name, 'voiceAgent')
+  service.dispose()
+})
 
 test('exports the browser websocket subprotocol used by the Host authorization fence', () => {
-  assert.equal(REALTIME_WS_PROTOCOL, 'dsh-voice-agent-v1')
+  assert.equal(REALTIME_WS_PROTOCOL, 'dsh-realtime-voice-v1')
 })
 
 test('constructs against the Cordis class-based Service contract', () => {
@@ -18,9 +31,9 @@ test('constructs against the Cordis class-based Service contract', () => {
 
 test('startConversation infers the provider protocol from the selected route', async () => {
   const service = Object.create(VoiceAgentService.prototype)
-  service.models = async () => [{ id: 'local/voice-agent', protocol: 'unsupported-test-protocol' }]
+  service.models = async () => [{ id: 'local/realtime-voice', protocol: 'unsupported-test-protocol' }]
   await assert.rejects(
-    () => service.startConversation({ routeId: 'local/voice-agent' }),
+    () => service.startConversation({ routeId: 'local/realtime-voice' }),
     /does not support a duplex Agent conversation/,
   )
 })
@@ -160,7 +173,7 @@ test('OpenAI startup replays readiness, interrupts playback, and cleans resource
     MediaStream: function () {},
     fetch: async () => ({ ok: true, text: async () => 'v=0' }),
   }
-  service.basePath = '/dsh-voice-agent'
+  service.basePath = '/dsh-realtime-voice'
   service.handles = new Set()
   const handle = await service.startConversation({ protocol: 'openai-webrtc', profileId: 'session-assistant', ownerId: 'session-assistant:s1' })
   const events = []
@@ -204,7 +217,7 @@ test('output-only OpenAI preview sends one text turn without microphone access',
     document: { createElement: () => ({ pause() {}, play() { return Promise.resolve() }, remove() {} }) },
     fetch: async () => ({ ok: true, text: async () => 'v=0' }),
   }
-  service.basePath = '/dsh-voice-agent'
+  service.basePath = '/dsh-realtime-voice'
   service.handles = new Set()
   const handle = await service.startConversation({ protocol: 'openai-webrtc', outputOnly: true, previewText: 'Hello preview' })
   const events = []
@@ -238,7 +251,7 @@ test('OpenAI startup failure closes already allocated browser resources', async 
     document: { createElement: () => audio },
     fetch: async () => { throw new Error('network failed') },
   }
-  service.basePath = '/dsh-voice-agent'
+  service.basePath = '/dsh-realtime-voice'
   service.handles = new Set()
   await assert.rejects(() => service.startConversation({ protocol: 'openai-webrtc' }), /network failed/)
   assert.equal(track.stopped, true)
@@ -255,7 +268,7 @@ test('missing microphone surfaces as a normalized mic_not_found rejection', asyn
   service.root = {
     navigator: { mediaDevices: { getUserMedia: async () => { throw notFound } } },
   }
-  service.basePath = '/dsh-voice-agent'
+  service.basePath = '/dsh-realtime-voice'
   service.handles = new Set()
   await assert.rejects(() => service.startConversation({ protocol: 'doubao-realtime-duplex' }), error => {
     assert.equal(error.code, 'mic_not_found')
@@ -286,7 +299,7 @@ test('doubao duplex drops the OpenAI-only response.create after a tool result', 
     WebSocket: WSocket,
     location: { protocol: 'http:', host: 'localhost:3080' },
   }
-  service.basePath = '/dsh-voice-agent'
+  service.basePath = '/dsh-realtime-voice'
   service.handles = new Set()
   const handle = await service.startConversation({ protocol: 'doubao-realtime-duplex', outputOnly: true })
   socket.onopen()

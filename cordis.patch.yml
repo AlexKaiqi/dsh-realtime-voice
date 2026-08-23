@@ -1,9 +1,9 @@
 - insert:
-    - id: voice-agent
-      name: 'dsh-voice-agent'
+    - id: realtime-voice
+      name: 'dsh-realtime-voice'
       config:
         enabled: true
-        basePath: '/dsh-voice-agent'
+        basePath: '/dsh-realtime-voice'
         trustedOpenAIOrigins:
           - 'https://api.openai.com'
         trustedDoubaoOrigins:

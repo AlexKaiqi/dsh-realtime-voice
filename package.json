@@ -1,5 +1,5 @@
 {
-  "name": "dsh-voice-agent",
+  "name": "dsh-realtime-voice",
   "version": "0.3.0",
   "description": "Provider-neutral full-duplex voice Agent capability for DeepSeek Harness.",
   "type": "module",
@@ -27,12 +27,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AlexKaiqi/dsh-voice-agent.git"
+    "url": "git+https://github.com/AlexKaiqi/dsh-realtime-voice.git"
   },
   "bugs": {
-    "url": "https://github.com/AlexKaiqi/dsh-voice-agent/issues"
+    "url": "https://github.com/AlexKaiqi/dsh-realtime-voice/issues"
   },
-  "homepage": "https://github.com/AlexKaiqi/dsh-voice-agent#readme",
+  "homepage": "https://github.com/AlexKaiqi/dsh-realtime-voice#readme",
   "scripts": {
     "test": "node --test test/*.test.mjs test/*.test.cjs",
     "check": "node --check dsh/index.js && node --check dsh/service.js && node --check dsh/transport.js && node --check client/client.js && npm test"

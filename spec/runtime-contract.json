@@ -24,10 +24,15 @@
     },
     "browserAuthorization": {
       "httpMarkers": [
-        "x-dsh-voice-agent",
+        "x-dsh-realtime-voice",
         "x-dsh-model-probe"
       ],
-      "websocketSubprotocol": "dsh-voice-agent-v1",
+      "websocketSubprotocol": "dsh-realtime-voice-v1",
+      "compatibilityAliases": {
+        "basePath": "/dsh-voice-agent",
+        "httpMarker": "x-dsh-voice-agent",
+        "websocketSubprotocol": "dsh-voice-agent-v1"
+      },
       "sameOrigin": true
     }
   },

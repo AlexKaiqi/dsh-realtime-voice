@@ -1,6 +1,6 @@
 {
   "specVersion": "0.3.0",
-  "name": "dsh-voice-agent",
+  "name": "dsh-realtime-voice",
   "pluginTypes": [
     "F3"
   ],
