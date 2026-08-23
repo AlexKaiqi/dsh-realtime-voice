@@ -7,6 +7,21 @@
     } })
   } else if (typeof module === 'object' && module.exports) {
     factory(module, module.exports, require, globalThis)
+  } else if (root) {
+    var standaloneModule = { exports: {} }
+    factory(standaloneModule, standaloneModule.exports, function (name) {
+      if (name !== '@deepseek-ai/cordis') throw new Error('Unsupported standalone dependency: ' + name)
+      return {
+        Service: class Service {
+          constructor(ctx, serviceName) {
+            this.ctx = ctx
+            this.name = serviceName
+            if (ctx && ctx.reflect && typeof ctx.reflect.provide === 'function') ctx.reflect.provide(serviceName, this)
+          }
+        },
+      }
+    }, root)
+    root.DSHRealtimeVoice = standaloneModule.exports
   }
 })(typeof window === 'undefined' ? globalThis : window, function (module, exports, require, root) {
   'use strict'
@@ -16,6 +31,7 @@
   var BASE_PATH = '/dsh-realtime-voice'
   var MARKER = 'x-dsh-realtime-voice'
   var WS_PROTOCOL = 'dsh-realtime-voice-v1'
+  var AUDIO_INPUT_WORKLET_NAME = 'dsh-realtime-voice-input'
   var protocols = Object.freeze(['openai-webrtc', 'doubao-realtime-duplex'])
   var nextHandleId = 1
   /** Defensive ceiling for async tool executors that never settle. */
@@ -107,9 +123,10 @@
   function normalizeRecognitionError(error) {
     var raw = text(error && error.error || error)
     var mapped = RECOGNITION_ERROR_CODES[raw]
+    var code = mapped || raw || 'recognition_failed'
     return {
-      code: mapped || raw,
-      message: mapped ? MEDIA_ERROR_MESSAGES[mapped] : text(error && error.message || error),
+      code: code,
+      message: mapped ? MEDIA_ERROR_MESSAGES[mapped] : text(error && error.message) || (raw ? 'Browser speech recognition failed: ' + raw : 'Browser speech recognition failed.'),
     }
   }
 
@@ -128,6 +145,21 @@
 
   function transcriptEvent(role, value, final) {
     return { type: 'transcript', role: role, source: role, text: text(value), final: !!final }
+  }
+
+  function outputLevelEvent(level) {
+    var bounded = Math.max(0, Math.min(1, Number(level) || 0))
+    return { type: 'audio-level', source: 'output', level: Math.round(bounded * 1000) / 1000 }
+  }
+
+  function pcmLevel(pcm) {
+    if (!pcm || !pcm.length) return 0
+    var sum = 0
+    for (var i = 0; i < pcm.length; i += 1) {
+      var sample = pcm[i] / 32768
+      sum += sample * sample
+    }
+    return Math.min(1, Math.sqrt(sum / pcm.length) * 2.4)
   }
 
   function normalizeProviderEvent(protocol, event) {
@@ -341,6 +373,7 @@
     var buffer = context.createBuffer(1, pcm.length, 24000)
     var channel = buffer.getChannelData(0)
     for (var i = 0; i < pcm.length; i += 1) channel[i] = pcm[i] / 32768
+    handle.emit(outputLevelEvent(pcmLevel(pcm)))
     var source = context.createBufferSource()
     source.buffer = buffer
     source.connect(context.destination)
@@ -349,7 +382,30 @@
     source.start(handle.playAt)
     handle.playAt += buffer.duration
     handle.sources.add(source)
-    source.onended = handle.guard(function () { handle.sources.delete(source) })
+    source.onended = handle.guard(function () {
+      handle.sources.delete(source)
+      if (!handle.sources.size) handle.emit(outputLevelEvent(0))
+    })
+  }
+
+  function gatewayOptions(value) {
+    var gateway = object(value)
+    if (!gateway.path) return null
+    var path = text(gateway.path)
+    if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{1,2047}$/.test(path) || path.indexOf('//') === 0) {
+      throw new TypeError('Voice gateway path must be a bounded same-origin absolute path')
+    }
+    var version = Number.isSafeInteger(gateway.version) && gateway.version > 0 ? gateway.version : null
+    var start = object(gateway.start)
+    if (!text(start.type)) throw new TypeError('Voice gateway start event requires a type')
+    var readyEvent = text(gateway.readyEvent) || 'session.ready'
+    if (!/^[a-z0-9._-]{1,120}$/i.test(readyEvent)) throw new TypeError('Voice gateway ready event is invalid')
+    return { path: path, version: version, start: start, readyEvent: readyEvent }
+  }
+
+  function gatewayEvent(gateway, event) {
+    if (!gateway || gateway.version === null) return event
+    return Object.assign({}, event, { version: gateway.version })
   }
 
   async function openDoubao(service, options) {
@@ -366,15 +422,19 @@
       var context = new AudioContext()
       handle.audioContext = context
       handle.sources = new Set()
+      handle.sessionReady = false
       handle.own(function () { context.close() })
       handle.cancelPlayback = function () {
         handle.sources.forEach(function (source) { try { source.stop() } catch (_) {} })
         handle.sources.clear()
         handle.playAt = context.currentTime
+        handle.emit(outputLevelEvent(0))
       }
       handle.own(handle.cancelPlayback)
+      var gateway = gatewayOptions(options.gateway)
       var wsProtocol = service.root.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      var socket = new service.root.WebSocket(wsProtocol + '//' + service.root.location.host + service.basePath + '/doubao', WS_PROTOCOL)
+      var socketURL = wsProtocol + '//' + service.root.location.host + (gateway ? gateway.path : service.basePath + '/doubao')
+      var socket = gateway ? new service.root.WebSocket(socketURL) : new service.root.WebSocket(socketURL, WS_PROTOCOL)
       handle.send = function (event) {
         // Doubao Duplex resumes the turn automatically after a function-call
         // result (the official SDK sends no response.create); forwarding the
@@ -382,12 +442,14 @@
         // model waiting on a stale event instead of speaking the follow-up.
         if (event.type === 'response.create') return
         voiceLog('upstream', event.type + (event.call_id ? ':' + event.call_id : ''))
-        jsonSend(socket, event)
+        jsonSend(socket, gatewayEvent(gateway, event))
       }
       handle.own(function () { socket.close(1000, 'client closed') })
       socket.onopen = handle.guard(function () {
         voiceLog('upstream', 'session.start')
-        jsonSend(socket, { type: 'session.start', routeId: options.routeId, profileId: options.profileId, context: options.context })
+        jsonSend(socket, gateway
+          ? gatewayEvent(gateway, gateway.start)
+          : { type: 'session.start', routeId: options.routeId, profileId: options.profileId, context: options.context })
       })
       socket.onmessage = handle.guard(function (message) {
         var event
@@ -398,10 +460,16 @@
         } else {
           voiceLog('downstream', event.type)
         }
-        if (event.type === 'session.ready') {
+        if (event.type === (gateway ? gateway.readyEvent : 'session.ready')) {
+          handle.sessionReady = true
           handle.emit({ type: 'status', connected: true, status: 'ready' })
           handle.emit({ type: 'phase', phase: options.previewText ? 'thinking' : 'listening' })
           if (options.previewText) jsonSend(socket, { type: 'preview.speak', text: text(options.previewText) })
+        }
+        if ((event.type === 'input_audio_buffer.speech_started' || event.type === 'conversation.item.input_audio_transcription.started') && handle.sources.size) {
+          handle.cancelPlayback()
+          jsonSend(socket, gatewayEvent(gateway, { type: 'response.cancel' }))
+          handle.emit({ type: 'interrupted' })
         }
         if (event.type === 'response.audio.delta' || event.type === 'response.output_audio.delta') schedulePCM(service, handle, text(event.delta))
         var normalized = normalizeProviderEvent('doubao-realtime-duplex', event)
@@ -410,16 +478,38 @@
       socket.onerror = handle.guard(function () { handle.emit(errorEvent('websocket_error', 'Doubao Realtime WebSocket failed', true)) })
       socket.onclose = handle.guard(function () { handle.close() })
       if (stream) {
+        var AudioWorkletNode = service.root.AudioWorkletNode
+        if (!context.audioWorklet || typeof context.audioWorklet.addModule !== 'function' || typeof AudioWorkletNode !== 'function') {
+          throw new Error('AudioWorklet is not available')
+        }
+        await context.audioWorklet.addModule(service.basePath + '/audio-input-worklet.js')
         var input = context.createMediaStreamSource(stream)
-        var processor = context.createScriptProcessor(4096, 1, 1)
-        input.connect(processor)
-        processor.connect(context.destination)
-        processor.onaudioprocess = handle.guard(function (event) {
-          if (socket.readyState !== 1) return
-          var pcm = downsamplePCM(event.inputBuffer.getChannelData(0), context.sampleRate, 16000)
-          jsonSend(socket, { type: 'input_audio_buffer.append', audio: bytesToBase64(service.root, new Uint8Array(pcm.buffer)) })
+        var processor = new AudioWorkletNode(context, AUDIO_INPUT_WORKLET_NAME, {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+          processorOptions: { chunkFrames: 2048 },
         })
-        handle.own(function () { processor.disconnect(); input.disconnect(); processor.onaudioprocess = null })
+        var mute = context.createGain()
+        mute.gain.value = 0
+        input.connect(processor)
+        processor.connect(mute)
+        mute.connect(context.destination)
+        processor.port.onmessage = handle.guard(function (event) {
+          if (socket.readyState !== 1 || !handle.sessionReady) return
+          var payload = object(event.data)
+          var samples = payload.samples
+          if (!samples || typeof samples.length !== 'number') return
+          var inputRate = Number(payload.sampleRate) || context.sampleRate
+          var pcm = downsamplePCM(samples, inputRate, 16000)
+          jsonSend(socket, gatewayEvent(gateway, { type: 'input_audio_buffer.append', audio: bytesToBase64(service.root, new Uint8Array(pcm.buffer)) }))
+        })
+        handle.own(function () {
+          processor.port.onmessage = null
+          processor.disconnect()
+          mute.disconnect()
+          input.disconnect()
+        })
       }
       return handle
     } catch (error) {
@@ -445,6 +535,7 @@
     recognition.lang = options.lang || 'en-US'
     recognition.continuous = options.continuous !== false
     recognition.interimResults = options.interim !== false
+    recognition.maxAlternatives = 1
     handle = {
       close: function () {
         if (closed) return
@@ -465,8 +556,9 @@
       }
     }
     recognition.onerror = function (event) {
-      if (closed || typeof options.onError !== 'function') return
+      if (closed) return
       var normalized = normalizeRecognitionError(event)
+      if (typeof options.onError !== 'function') return
       options.onError(errorEvent(normalized.code, normalized.message, event.error === 'no-speech'))
     }
     recognition.onend = function () {
@@ -553,7 +645,7 @@
       protocols: protocols.slice(),
       realtime: {
         'openai-webrtc': media && typeof this.root.RTCPeerConnection === 'function',
-        'doubao-realtime-duplex': media && typeof this.root.WebSocket === 'function' && !!(this.root.AudioContext || this.root.webkitAudioContext),
+        'doubao-realtime-duplex': media && typeof this.root.WebSocket === 'function' && typeof this.root.AudioWorkletNode === 'function' && !!(this.root.AudioContext || this.root.webkitAudioContext),
       },
       recognition: !!(this.root.SpeechRecognition || this.root.webkitSpeechRecognition),
       audioInput: { exclusive: true, busy: !!this.inputLease, ownerId: this.inputLease ? this.inputLease.ownerId : '' },

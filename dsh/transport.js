@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import WebSocket, { WebSocketServer } from 'ws'
 import { DOUBAO_PREVIEW_PROMPT_PCM_BASE64 } from './preview-audio.js'
 
@@ -15,6 +17,7 @@ export const DEFAULT_BASE_PATH = '/dsh-realtime-voice'
 export const VOICE_AGENT_COMPAT_BASE_PATH = '/dsh-voice-agent'
 export const MAX_STARTUP_EVENTS = 16
 export const MAX_PROVIDER_FRAME_BYTES = 512 * 1024
+const AUDIO_INPUT_WORKLET_SOURCE = readFileSync(fileURLToPath(new URL('../client/audio-input-worklet.js', import.meta.url)))
 const MAX_BODY_BYTES = 256 * 1024
 const MAX_AUDIO_BASE64_CHARS = 256 * 1024
 const MAX_TEXT_CHARS = 64 * 1024
@@ -610,6 +613,25 @@ function registerModelsRoute(scope, service, path) {
   }), 'dsh-realtime-voice.models')
 }
 
+function registerAudioInputWorklet(scope, path) {
+  ownRoute(scope, () => scope.webServer.register({
+    kind: 'exact',
+    path,
+    handler(req, res) {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { allow: 'GET' })
+        return res.end()
+      }
+      res.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'content-length': AUDIO_INPUT_WORKLET_SOURCE.length,
+        'cache-control': 'no-cache',
+      })
+      res.end(AUDIO_INPUT_WORKLET_SOURCE)
+    },
+  }), 'dsh-realtime-voice.audio-input-worklet')
+}
+
 function registerDoubaoProbe(scope, service, path, policy) {
   ownRoute(scope, () => scope.webServer.register({
     kind: 'exact',
@@ -642,6 +664,7 @@ export function registerRealtimeTransport(scope, service, config = {}) {
   // short-lived voice-agent path mounted while consumers return to the stable
   // realtime-voice package name.
   for (const basePath of new Set([DEFAULT_BASE_PATH, VOICE_AGENT_COMPAT_BASE_PATH, configuredPath])) {
+    registerAudioInputWorklet(scope, `${basePath}/audio-input-worklet.js`)
     registerModelsRoute(scope, service, `${basePath}/models`)
     registerOpenAISession(scope, service, `${basePath}/openai/session`, policy)
     registerDoubaoProbe(scope, service, `${basePath}/doubao/probe`, policy)

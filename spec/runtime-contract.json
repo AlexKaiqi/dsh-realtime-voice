@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 7,
   "name": "duplex-voice-agent",
   "runtime": "dsh-multi-model-provider/realtimeModelRuntime",
   "route": {
@@ -63,7 +63,20 @@
       "ownerOption": "ownerId",
       "conflictCode": "audio_input_busy",
       "standbyPreemption": "recognize-preemptible",
-      "release": "conversation-end-or-startup-failure"
+      "release": "conversation-end-or-startup-failure",
+      "capture": "same-origin AudioWorkletProcessor batches Float32 microphone frames; the Client downsamples them to 16 kHz PCM for Doubao",
+      "workletPath": "/dsh-realtime-voice/audio-input-worklet.js"
+    },
+    "standbyRecognition": {
+      "providerSessionBeforeWake": false,
+      "implementation": "browser SpeechRecognition; wake phrase matching remains in the product layer",
+      "billingBoundary": "startConversation is called only by the product after a matching transcript",
+      "privacyNote": "browser recognition is not claimed to be on-device unless the user agent explicitly guarantees it"
+    },
+    "standaloneBrowserClient": {
+      "path": "/dsh-realtime-voice/client.js",
+      "global": "DSHRealtimeVoice",
+      "gateway": "a bounded same-origin absolute path may retain product-owned authorization, versioned session setup, and readiness event"
     },
     "actionRegistry": {
       "registration": "registerActions(ownerPrefix, actions)",
@@ -106,6 +119,10 @@
         "ok",
         "output",
         "error"
+      ],
+      "audio-level": [
+        "source",
+        "level"
       ],
       "error": [
         "code",

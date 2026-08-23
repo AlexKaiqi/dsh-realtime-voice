@@ -23,7 +23,8 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "dsh-multi-model-provider": "link:../dsh-multi-model-provider"
+    "dsh-multi-model-provider": "link:../dsh-multi-model-provider",
+    "playwright": "^1.62.1"
   },
   "repository": {
     "type": "git",
@@ -35,7 +36,8 @@
   "homepage": "https://github.com/AlexKaiqi/dsh-realtime-voice#readme",
   "scripts": {
     "test": "node --test test/*.test.mjs test/*.test.cjs",
-    "check": "node --check dsh/index.js && node --check dsh/service.js && node --check dsh/transport.js && node --check client/client.js && npm test"
+    "test:e2e:live": "DSH_VOICE_E2E_LIVE=1 node --test test/live-voice.e2e.mjs",
+    "check": "node --check dsh/index.js && node --check dsh/service.js && node --check dsh/transport.js && node --check client/client.js && node --check client/audio-input-worklet.js && node --check test/live-voice.e2e.mjs && npm test"
   },
   "dsh": {
     "inventory": {

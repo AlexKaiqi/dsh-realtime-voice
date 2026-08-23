@@ -1,9 +1,12 @@
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 import { voiceAgentAdapters } from './service.js'
 import { registerRealtimeTransport } from './transport.js'
 
 export const name = 'realtime-voice'
 export const inject = []
+const CLIENT_PATH = fileURLToPath(new URL('../client/client.js', import.meta.url))
 
 export const Config = z.object({
   enabled: z.boolean().default(true),
@@ -39,6 +42,15 @@ export function apply(ctx, config) {
     if (disposers.some(dispose => typeof dispose !== 'function')) throw new Error('Realtime adapter registration must return a disposer')
     if (typeof scope.effect !== 'function') throw new Error('Voice Agent requires scope.effect lifecycle ownership')
     scope.effect(() => () => disposers.forEach(dispose => dispose()), 'dsh-realtime-voice.adapters')
+    scope.effect(() => scope.webServer.register({
+      kind: 'exact',
+      path: '/dsh-realtime-voice/client.js',
+      handler: async (_req, res) => {
+        const source = await readFile(CLIENT_PATH)
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' })
+        res.end(source)
+      },
+    }), 'dsh-realtime-voice standalone browser client')
     registerRealtimeTransport(scope, scope.realtimeModelRuntime, config)
   })
 }

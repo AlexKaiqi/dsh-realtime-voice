@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict')
 const { readFileSync } = require('node:fs')
 const test = require('node:test')
+const { runInNewContext } = require('node:vm')
 const client = require('../client/client.js')
 const { REALTIME_WS_PROTOCOL, VoiceConversation, VoiceAgentService, normalizeProviderEvent, normalizeMediaError } = client
 
@@ -10,9 +11,134 @@ test('keeps the stable realtime-voice package and Loader name while exposing voi
   assert.equal(pkg.name, 'dsh-realtime-voice')
   assert.equal(client.name, 'dsh-realtime-voice')
   assert.match(source, /load\(\{ id: 'dsh-realtime-voice'/)
+  assert.match(source, /root\.DSHRealtimeVoice = standaloneModule\.exports/)
   const service = new VoiceAgentService({ reflect: { provide() {} } }, { root: {} })
   assert.equal(service.name, 'voiceAgent')
   service.dispose()
+})
+
+test('the standalone browser script publishes a usable global without the DSH module loader', () => {
+  const source = readFileSync(require.resolve('../client/client.js'), 'utf8')
+  const sandbox = { window: {} }
+  runInNewContext(source, sandbox)
+  assert.equal(typeof sandbox.window.DSHRealtimeVoice.VoiceAgentService, 'function')
+  const service = new sandbox.window.DSHRealtimeVoice.VoiceAgentService(null, { root: sandbox.window })
+  assert.equal(service.name, 'voiceAgent')
+  service.dispose()
+})
+
+test('the Doubao input worklet batches transferable Float32 microphone frames', () => {
+  const source = readFileSync(require.resolve('../client/audio-input-worklet.js'), 'utf8')
+  let name
+  let Processor
+  class AudioWorkletProcessor {
+    constructor() { this.port = { postMessage() {} } }
+  }
+  runInNewContext(source, {
+    AudioWorkletProcessor,
+    Float32Array,
+    Number,
+    sampleRate: 48000,
+    registerProcessor(value, implementation) { name = value; Processor = implementation },
+  })
+  assert.equal(name, 'dsh-realtime-voice-input')
+  const instance = new Processor({ processorOptions: { chunkFrames: 256 } })
+  const messages = []
+  instance.port.postMessage = (message, transfer) => messages.push({ message, transfer })
+  assert.equal(instance.process([[new Float32Array(128).fill(.25)]]), true)
+  assert.equal(messages.length, 0)
+  instance.process([[new Float32Array(128).fill(-.25)]])
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].message.sampleRate, 48000)
+  assert.deepEqual(Array.from(messages[0].message.samples.slice(0, 2)), [.25, .25])
+  assert.deepEqual(Array.from(messages[0].message.samples.slice(-2)), [-.25, -.25])
+  assert.equal(messages[0].transfer[0], messages[0].message.samples.buffer)
+})
+
+test('a product-owned same-origin gateway keeps authorization data on its own route and emits output levels', async () => {
+  const sent = []
+  const sources = []
+  const modules = []
+  let socket
+  let processor
+  class WSocket {
+    constructor(url, protocol) { this.url = url; this.protocol = protocol; this.readyState = 1; socket = this }
+    send(value) { sent.push(JSON.parse(value)) }
+    close() {}
+  }
+  function AudioContext() { this.currentTime = 0; this.sampleRate = 48000; this.destination = {}; this.audioWorklet = { addModule: async path => modules.push(path) } }
+  AudioContext.prototype.createBuffer = function (_channels, length) { return { getChannelData: () => new Float32Array(length), duration: .02 } }
+  AudioContext.prototype.createBufferSource = function () { const source = { connect() {}, start() {}, onended: null }; sources.push(source); return source }
+  AudioContext.prototype.createMediaStreamSource = function () { return { connect() {}, disconnect() {} } }
+  AudioContext.prototype.createGain = function () { return { gain: { value: 1 }, connect() {}, disconnect() {} } }
+  AudioContext.prototype.close = function () {}
+  class AudioWorkletNode {
+    constructor(_context, name, options) { this.name = name; this.options = options; this.port = { onmessage: null }; processor = this }
+    connect() {}
+    disconnect() {}
+  }
+  const track = { stop() {} }
+  const service = Object.create(VoiceAgentService.prototype)
+  service.root = {
+    navigator: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track] }) } },
+    AudioContext,
+    AudioWorkletNode,
+    WebSocket: WSocket,
+    location: { protocol: 'http:', host: 'localhost:3080' },
+    atob: globalThis.atob,
+    btoa: globalThis.btoa,
+  }
+  service.basePath = '/dsh-realtime-voice'
+  service.handles = new Set()
+  service.inputLease = null
+  const handle = await service.startConversation({
+    protocol: 'doubao-realtime-duplex',
+    gateway: { path: '/persona/realtime?token=opaque', version: 1, readyEvent: 'session.created', start: { type: 'session.start', persona: 'kaiqi' } },
+  })
+  const events = []
+  handle.subscribe(event => events.push(event))
+  socket.onopen()
+  assert.equal(socket.url, 'ws://localhost:3080/persona/realtime?token=opaque')
+  assert.equal(socket.protocol, undefined)
+  assert.deepEqual(modules, ['/dsh-realtime-voice/audio-input-worklet.js'])
+  assert.equal(processor.name, 'dsh-realtime-voice-input')
+  assert.deepEqual(sent, [{ version: 1, type: 'session.start', persona: 'kaiqi' }])
+  const inputEvent = { data: { samples: new Float32Array(480).fill(.1), sampleRate: 48000 } }
+  processor.port.onmessage(inputEvent)
+  assert.equal(sent.length, 1, 'microphone audio waits for the product gateway readiness event')
+  socket.onmessage({ data: JSON.stringify({ type: 'session.created' }) })
+  assert.equal(events.some(event => event.type === 'status' && event.status === 'ready'), true)
+  assert.equal(events.some(event => event.type === 'phase' && event.phase === 'listening'), true)
+  processor.port.onmessage(inputEvent)
+  assert.equal(sent.at(-1).type, 'input_audio_buffer.append')
+  assert.equal(sent.at(-1).version, 1)
+  const pcm = Buffer.alloc(8); pcm.writeInt16LE(16384, 0); pcm.writeInt16LE(-16384, 2); pcm.writeInt16LE(8192, 4); pcm.writeInt16LE(-8192, 6)
+  socket.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta', delta: pcm.toString('base64') }) })
+  assert.equal(events.some(event => event.type === 'audio-level' && event.source === 'output' && event.level > 0), true)
+  sources.at(-1).onended()
+  assert.deepEqual(events.at(-1), { type: 'audio-level', source: 'output', level: 0 })
+  handle.interrupt()
+  assert.deepEqual(sent.at(-1), { version: 1, type: 'response.cancel' })
+  handle.end()
+  assert.equal(processor.port.onmessage, null)
+})
+
+test('rejects cross-origin or protocol-relative product gateway paths', async () => {
+  function AudioContext() { this.currentTime = 0 }
+  AudioContext.prototype.close = function () {}
+  const service = Object.create(VoiceAgentService.prototype)
+  service.root = {
+    navigator: { mediaDevices: { getUserMedia: async () => { throw new Error('microphone must not be requested') } } },
+    AudioContext,
+    WebSocket: class {},
+    location: { protocol: 'https:', host: 'dsh.local' },
+  }
+  service.basePath = '/dsh-realtime-voice'
+  service.handles = new Set()
+  await assert.rejects(
+    () => service.startConversation({ protocol: 'doubao-realtime-duplex', outputOnly: true, gateway: { path: '//evil.example/voice', start: { type: 'session.start' } } }),
+    /same-origin absolute path/,
+  )
 })
 
 test('exports the browser websocket subprotocol used by the Host authorization fence', () => {
@@ -290,7 +416,6 @@ test('doubao duplex drops the OpenAI-only response.create after a tool result', 
   AudioContext.prototype.createBuffer = function () { return { getChannelData: () => new Float32Array(0), duration: 0 } }
   AudioContext.prototype.createBufferSource = function () { return { buffer: null, connect() {}, start() {}, onended: null } }
   AudioContext.prototype.createMediaStreamSource = function () { return { connect() {} } }
-  AudioContext.prototype.createScriptProcessor = function () { return { connect() {}, disconnect() {}, onaudioprocess: null } }
   AudioContext.prototype.close = function () {}
   const service = Object.create(VoiceAgentService.prototype)
   service.root = {
@@ -327,9 +452,11 @@ test('browser recognition error codes normalize to the same mic codes', () => {
   service.recognize({ ownerId: 'session-assistant:s1', onError: event => errors.push(event) })
   recognitions[0].onerror({ error: 'audio-capture', message: 'no mic' })
   recognitions[0].onerror({ error: 'no-speech', message: 'nothing heard' })
+  recognitions[0].onerror({ error: 'network', message: '' })
   assert.deepEqual(errors, [
     { type: 'error', code: 'mic_not_found', message: 'No microphone input device was found. Check your system input devices or connect a headset.', recoverable: false },
     { type: 'error', code: 'no-speech', message: 'nothing heard', recoverable: true },
+    { type: 'error', code: 'network', message: 'Browser speech recognition failed: network', recoverable: false },
   ])
 })
 
@@ -382,6 +509,7 @@ test('browser capabilities expose an exclusive audio-input lease', () => {
     RTCPeerConnection() {},
     WebSocket() {},
     AudioContext() {},
+    AudioWorkletNode() {},
     SpeechRecognition: Recognition,
     speechSynthesis: { getVoices: () => [{ name: 'Voice A', lang: 'en-US', default: true }] },
   }

@@ -69,12 +69,44 @@ During the 0.3 migration, `open`, `registerTools`, `resolveTool`, `close`, `mode
 - `interrupt()`
 - `end()`
 
-The Client service owns `RTCPeerConnection`, data channels, microphone tracks, media/audio elements, WebSockets, `AudioContext`, PCM capture and playback, `SpeechRecognition`, `speechSynthesis`, listeners, late-callback guards, and the neutral tool-execution loop. It does not know drafts, Agent submission, knowledge bases, pets, or any product business semantics.
+The Host also serves the same implementation at `/dsh-realtime-voice/client.js` for product-owned standalone pages. It publishes `window.DSHRealtimeVoice`; a product may pass a bounded same-origin `gateway` to `startConversation` so its own short-lived authorization, versioned start event, and readiness event remain on the product route. The shared Client still owns microphone capture, playback, interruption, cleanup, and normalized events. Doubao output additionally emits bounded `{ type: "audio-level", source: "output", level: 0..1 }` events for avatar animation without exposing raw PCM to the consumer.
+
+The Client service owns `RTCPeerConnection`, data channels, microphone tracks, media/audio elements, WebSockets, `AudioContext`, `AudioWorklet` PCM capture and playback, `SpeechRecognition`, `speechSynthesis`, listeners, late-callback guards, and the neutral tool-execution loop. It does not know drafts, Agent submission, knowledge bases, pets, or any product business semantics. The Doubao input worklet is loaded from the same Host base path; no deprecated `ScriptProcessorNode`, Blob module, or production microphone bypass is retained.
 
 Every microphone consumer supplies a bounded `ownerId`. Audio input is an exclusive lease: a competing conversation fails with `code: "audio_input_busy"` and the current owner id. Ending a conversation or failing during startup releases the lease.
+
+`voiceAgent.recognize()` is the low-cost standby primitive used by product plugins. It never opens a Realtime Provider session itself. Products remain responsible for matching a wake phrase and calling `startConversation()` only after a match. Browser speech recognition is not described as on-device unless the user agent explicitly guarantees local processing.
 
 Browser media failures are normalized to stable, consumer-localizable codes on the rejected error (and on `recognize()` error events): `mic_not_found` (no input device), `mic_permission_denied`, `mic_unreadable`, and `mic_aborted`. The raw DOMException message is replaced with one canonical English sentence per code; consumers translate `error.code` into their own language and fall back to the message for unknown codes.
 
 ## Runtime integration
 
 Business plugins register profiles with `realtimeModelRuntime`, then pass only the selected route, profile, Agent context, and owner identity to `voiceAgent.startConversation`. They register product actions under the same owner prefix. They never supply credentials or provider events, and this plugin never sees drafts, knowledge policy, submission policy, or delegation authorization.
+
+## Live browser voice verification
+
+The maintained live E2E case sends generated speech through a browser-owned virtual microphone, the real packaged Client, the local DSH Host, a real Doubao Realtime route, normalized conversation events, the automatic action-execution loop, response audio, and microphone-lease cleanup. Product actions are recorded by an isolated executor, so the case does not submit to or mutate a real Session.
+
+Live Realtime calls may incur Provider charges and are skipped by the normal test suite. Install the Playwright browser once, start the configured DSH Web profile, and opt in explicitly:
+
+```sh
+pnpm exec playwright install chromium
+pnpm test:e2e:live
+```
+
+On macOS the case creates a deterministic Chinese WAV with `say` and `afconvert`. To exercise a separate speech-generation model, generate the same utterance as a WAV and pass its path without putting credentials in the command or repository:
+
+```sh
+DSH_VOICE_E2E_WAV=/absolute/path/from-speech-model.wav pnpm test:e2e:live
+```
+
+Defaults target `http://127.0.0.1:3080`, the first built-in Doubao voice route, and the `session-assistant` profile. The maintained case can be pointed at another installed product profile without changing source:
+
+```sh
+DSH_VOICE_E2E_PROFILE_ID=pet-assistant \
+DSH_VOICE_E2E_EXPECTED_ACTION=delegate_to_agent \
+DSH_VOICE_E2E_UTTERANCE='请把语音端到端验证七三一九明确提交给当前 Agent。' \
+pnpm test:e2e:live
+```
+
+Supported overrides are `DSH_VOICE_E2E_BASE_URL`, `DSH_VOICE_E2E_ROUTE_ID`, `DSH_VOICE_E2E_PROFILE_ID`, `DSH_VOICE_E2E_EXPECTED_ACTION`, `DSH_VOICE_E2E_PROBE_TOKEN`, `DSH_VOICE_E2E_UTTERANCE`, `DSH_VOICE_E2E_WAV`, and `DSH_VOICE_E2E_TIMEOUT_MS`. The proxy refuses non-loopback targets, and the test never reads or forwards a credential value itself.
