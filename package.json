@@ -2,6 +2,10 @@
   "name": "dsh-realtime-voice",
   "version": "0.3.1",
   "description": "Provider-neutral full-duplex voice Agent capability for DeepSeek Harness.",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "main": "./dsh/index.js",
   "exports": {
