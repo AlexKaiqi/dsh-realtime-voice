@@ -1,12 +1,16 @@
 # dsh-realtime-voice
 
-Provider-neutral full-duplex voice Agent capability for DeepSeek Harness.
+[![npm version](https://img.shields.io/npm/v/dsh-realtime-voice.svg)](https://www.npmjs.com/package/dsh-realtime-voice)
+[![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-dsh--plugin-0b7285.svg)](https://github.com/topics/dsh-plugin)
+[![MIT license](https://img.shields.io/npm/l/dsh-realtime-voice.svg)](./LICENSE)
+
+`dsh-realtime-voice` is a provider-neutral, full-duplex voice-agent plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). It connects browser audio to OpenAI Realtime over WebRTC or Doubao Realtime Duplex over WebSocket while keeping credentials and provider protocols behind the DSH Host boundary.
 
 The public product abstraction is deliberately small: a consumer starts a **voice conversation with an Agent**, observes the conversation, lets the user interrupt naturally, supplies product-owned actions, and ends the conversation. Provider sessions, wire events, audio buffers, VAD, WebRTC, WebSocket, STT, LLM, and TTS are implementation details behind that boundary.
 
 `dsh-multi-model-provider` owns model routes, credential references, and provider profiles. Product plugins own Agent identity, context, durable history, action policy, and authorization. This plugin owns only the live voice conversation: simultaneous listening and speaking, interruption, browser media lifetime, provider adaptation, normalized conversation events, and the neutral action-execution loop.
 
-## Product boundary
+## Install
 
 This release targets DeepSeek Harness `0.1.1-rc.2`. `dsh-multi-model-provider@^0.1.0-rc.11` is required and must be installed directly in the same profile. DSH does not auto-install, activate, or update peer plugins.
 
@@ -14,6 +18,8 @@ This release targets DeepSeek Harness `0.1.1-rc.2`. `dsh-multi-model-provider@^0
 dsh plugin --profile web add dsh-multi-model-provider dsh-realtime-voice
 dsh plugin --profile web update dsh-multi-model-provider dsh-realtime-voice
 ```
+
+## Product boundary
 
 ```text
 Agent (owned by the product)
