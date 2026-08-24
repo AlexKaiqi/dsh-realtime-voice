@@ -37,6 +37,7 @@
   var MAX_INITIAL_USER_TEXT_CHARS = 20000
   var WAKE_CAPTURE_SAMPLE_RATE = 24000
   var MAX_WAKE_CAPTURE_SECONDS = 30
+  var WAKE_CAPTURE_PREROLL_SECONDS = 4
   var AUDIO_PACKET_BYTES = 3200
   /** Defensive ceiling for async tool executors that never settle. */
   var DEFAULT_TOOL_TIMEOUT_MS = 300000
@@ -608,9 +609,12 @@
       var chunks = []
       var byteLength = 0
       var maxBytes = WAKE_CAPTURE_SAMPLE_RATE * MAX_WAKE_CAPTURE_SECONDS * 2
+      var prerollBytes = WAKE_CAPTURE_SAMPLE_RATE * WAKE_CAPTURE_PREROLL_SECONDS * 2
+      var captureActive = false
       var captureStream = null
       var captureContext = null
-      handle.discardAudio = function () { chunks.length = 0; byteLength = 0 }
+      handle.discardAudio = function () { chunks.length = 0; byteLength = 0; captureActive = false }
+      handle.markAudioUtterance = function () { captureActive = true }
       handle.takeAudio = function () {
         if (!byteLength) return undefined
         var joined = new Uint8Array(byteLength)
@@ -619,7 +623,15 @@
         handle.discardAudio()
         return { pcm16Base64: bytesToBase64(service.root, joined), sampleRate: WAKE_CAPTURE_SAMPLE_RATE }
       }
-      Promise.resolve(service.root.navigator.mediaDevices.getUserMedia({ audio: true })).then(function (stream) {
+      var captureRequest
+      try {
+        var mediaDevices = service.root.navigator && service.root.navigator.mediaDevices
+        if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') throw new Error('getUserMedia is not available for wake capture')
+        captureRequest = mediaDevices.getUserMedia({ audio: true })
+      } catch (error) {
+        captureRequest = Promise.reject(error)
+      }
+      Promise.resolve(captureRequest).then(function (stream) {
         captureStream = stream
         if (closed) { stream.getTracks().forEach(function (track) { track.stop() }); return }
         var AudioContext = service.root.AudioContext || service.root.webkitAudioContext
@@ -650,7 +662,8 @@
             var chunk = new Uint8Array(pcm.buffer.slice(0))
             chunks.push(chunk)
             byteLength += chunk.length
-            while (byteLength > maxBytes && chunks.length > 1) byteLength -= chunks.shift().length
+            var limit = captureActive ? maxBytes : prerollBytes
+            while (byteLength > limit && chunks.length > 1) byteLength -= chunks.shift().length
           }
           captureCleanup = function () {
             captureCleanup = null
@@ -674,6 +687,7 @@
     }
     recognition.onresult = function (event) {
       if (closed) return
+      if (handle.markAudioUtterance) handle.markAudioUtterance()
       for (var i = event.resultIndex; i < event.results.length; i += 1) {
         var result = event.results[i]
         if (typeof options.onTranscript === 'function') options.onTranscript({ text: text(result[0] && result[0].transcript), final: !!result.isFinal, resultIndex: i })
