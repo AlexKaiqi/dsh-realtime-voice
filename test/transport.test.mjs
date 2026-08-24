@@ -139,6 +139,19 @@ test('maps a provider-neutral preview to a fixed microphone-free Doubao audio tu
   assert.equal(safeUpstreamEvent({ type: 'preview.speak', text: 'x'.repeat(501) }, { pendingToolCalls: new Set() }, {}).at(-1).type, 'input_audio_buffer.commit')
 })
 
+test('maps bounded initial user text to one Doubao user item without an OpenAI response trigger', () => {
+  const event = safeUpstreamEvent({ type: 'input.text', text: '  帮我继续刚才的任务  ' }, { pendingToolCalls: new Set() }, {})
+  assert.equal(event.type, 'conversation.item.create')
+  assert.deepEqual(event.item, {
+    type: 'message',
+    role: 'user',
+    content: [{ type: 'input_text', text: '帮我继续刚才的任务' }],
+    interrupt_mode: 1,
+  })
+  assert.throws(() => safeUpstreamEvent({ type: 'input.text', text: '   ' }, { pendingToolCalls: new Set() }, {}), /required/)
+  assert.equal(safeUpstreamEvent({ type: 'input.text', text: 'x'.repeat(20_001) }, { pendingToolCalls: new Set() }, {}).item.content[0].text.length, 20_000)
+})
+
 test('keeps a pending tool call retryable when its result is invalid', () => {
   const state = {
     id: 'session-id',

@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "name": "duplex-voice-agent",
   "runtime": "dsh-multi-model-provider/realtimeModelRuntime",
   "route": {
@@ -43,6 +43,9 @@
       "startConversation",
       "registerActions"
     ],
+    "startConversationOptions": {
+      "initialUserText": "optional bounded text captured by a wake recognizer; after Provider readiness it is emitted as a finalized input transcript and submitted as the first real user turn"
+    },
     "compatibilityMethods": [
       "models",
       "open",

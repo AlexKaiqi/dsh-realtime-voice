@@ -293,6 +293,20 @@ export function safeUpstreamEvent(message, state, service) {
     case 'response.cancel':
     case 'response.create':
       return { type: message.type, event_id: randomUUID() }
+    case 'input.text': {
+      const text = string(message.text, 20_000)?.trim()
+      if (!text) throw new Error('initial user text is required')
+      return {
+        type: 'conversation.item.create',
+        event_id: randomUUID(),
+        item: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text }],
+          interrupt_mode: 1,
+        },
+      }
+    }
     case 'preview.speak': {
       const preview = string(message.text, 500)
       if (!preview) throw new Error('voice preview text is required')

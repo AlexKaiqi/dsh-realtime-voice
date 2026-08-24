@@ -34,6 +34,10 @@
   var AUDIO_INPUT_WORKLET_NAME = 'dsh-realtime-voice-input'
   var protocols = Object.freeze(['openai-webrtc', 'doubao-realtime-duplex'])
   var nextHandleId = 1
+  var MAX_INITIAL_USER_TEXT_CHARS = 20000
+  var WAKE_CAPTURE_SAMPLE_RATE = 24000
+  var MAX_WAKE_CAPTURE_SECONDS = 30
+  var AUDIO_PACKET_BYTES = 3200
   /** Defensive ceiling for async tool executors that never settle. */
   var DEFAULT_TOOL_TIMEOUT_MS = 300000
 
@@ -43,6 +47,32 @@
 
   function text(value) {
     return typeof value === 'string' ? value : ''
+  }
+
+  function initialUserText(value) {
+    return text(value).trim().slice(0, MAX_INITIAL_USER_TEXT_CHARS)
+  }
+
+  function initialAudioBytes(rootObject, value, targetRate) {
+    value = object(value)
+    var encoded = text(value.pcm16Base64)
+    var sourceRate = Number(value.sampleRate)
+    if (!encoded || !Number.isFinite(sourceRate) || sourceRate < 8000 || sourceRate > 48000) return null
+    var pcm
+    try { pcm = base64ToInt16(rootObject, encoded) } catch (_) { return null }
+    if (!pcm.length || pcm.length > sourceRate * MAX_WAKE_CAPTURE_SECONDS) return null
+    if (sourceRate === targetRate) return new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+    var ratio = sourceRate / targetRate
+    var output = new Int16Array(Math.floor(pcm.length / ratio))
+    for (var i = 0; i < output.length; i += 1) output[i] = pcm[Math.floor(i * ratio)] || 0
+    return new Uint8Array(output.buffer)
+  }
+
+  function sendInitialPCM(rootObject, send, bytes) {
+    for (var offset = 0; offset < bytes.length; offset += AUDIO_PACKET_BYTES) {
+      send({ type: 'input_audio_buffer.append', audio: bytesToBase64(rootObject, bytes.subarray(offset, offset + AUDIO_PACKET_BYTES)) })
+    }
+    send({ type: 'input_audio_buffer.commit' })
   }
 
   function errorMessage(error) {
@@ -300,17 +330,29 @@
       handle.send = function (event) {
         if (event.type === 'context.update') return jsonSend(channel, { type: 'session.update', session: { instructions: text(event.context) } })
         if (event.type === 'tool.result') return jsonSend(channel, { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: event.call_id, output: event.output } })
+        if (event.type === 'input.text') {
+          jsonSend(channel, { type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: initialUserText(event.text) }] } })
+          return jsonSend(channel, { type: 'response.create' })
+        }
         if (event.type === 'response.create') return jsonSend(channel, { type: 'response.create' })
         return jsonSend(channel, event)
       }
       var openAISend = handle.send
       handle.send = function (event) { voiceLog('upstream', event.type + (event.call_id ? ':' + event.call_id : '')); return openAISend(event) }
       channel.onopen = handle.guard(function () {
+        var initial = initialUserText(options.initialUserText)
+        var captured = initialAudioBytes(service.root, options.initialAudio, 24000)
         handle.emit({ type: 'status', connected: true, status: 'ready' })
-        handle.emit({ type: 'phase', phase: options.previewText ? 'thinking' : 'listening' })
+        handle.emit({ type: 'phase', phase: options.previewText || initial || captured ? 'thinking' : 'listening' })
         if (options.previewText) {
           jsonSend(channel, { type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: text(options.previewText) }] } })
           jsonSend(channel, { type: 'response.create' })
+        } else if (captured) {
+          if (initial) handle.emit(transcriptEvent('input', initial, true))
+          sendInitialPCM(service.root, function (event) { jsonSend(channel, event) }, captured)
+        } else if (initial) {
+          handle.emit(transcriptEvent('input', initial, true))
+          handle.send({ type: 'input.text', text: initial })
         }
       })
       channel.onmessage = handle.guard(function (message) {
@@ -461,10 +503,20 @@
           voiceLog('downstream', event.type)
         }
         if (event.type === (gateway ? gateway.readyEvent : 'session.ready')) {
+          var initial = initialUserText(options.initialUserText)
+          var captured = initialAudioBytes(service.root, options.initialAudio, 16000)
           handle.sessionReady = true
           handle.emit({ type: 'status', connected: true, status: 'ready' })
-          handle.emit({ type: 'phase', phase: options.previewText ? 'thinking' : 'listening' })
+          handle.emit({ type: 'phase', phase: options.previewText || initial || captured ? 'thinking' : 'listening' })
           if (options.previewText) jsonSend(socket, { type: 'preview.speak', text: text(options.previewText) })
+          else if (captured) {
+            if (initial) handle.emit(transcriptEvent('input', initial, true))
+            sendInitialPCM(service.root, function (outgoing) { handle.send(outgoing) }, captured)
+          }
+          else if (initial) {
+            handle.emit(transcriptEvent('input', initial, true))
+            handle.send({ type: 'input.text', text: initial })
+          }
         }
         if ((event.type === 'input_audio_buffer.speech_started' || event.type === 'conversation.item.input_audio_transcription.started') && handle.sources.size) {
           handle.cancelPlayback()
@@ -532,11 +584,14 @@
     var recognition
     try { recognition = new Recognition() } catch (error) { releaseInput(); throw error }
     var closed = false
+    var captureCleanup = null
     recognition.lang = options.lang || 'en-US'
     recognition.continuous = options.continuous !== false
     recognition.interimResults = options.interim !== false
     recognition.maxAlternatives = 1
     handle = {
+      discardAudio: function () {},
+      takeAudio: function () {},
       close: function () {
         if (closed) return
         closed = true
@@ -545,8 +600,77 @@
         recognition.onend = null
         service.auxiliary.delete(handle)
         releaseInput()
+        if (captureCleanup) captureCleanup()
         try { recognition.stop() } catch (_) {}
       },
+    }
+    if (options.captureAudio === true) {
+      var chunks = []
+      var byteLength = 0
+      var maxBytes = WAKE_CAPTURE_SAMPLE_RATE * MAX_WAKE_CAPTURE_SECONDS * 2
+      var captureStream = null
+      var captureContext = null
+      handle.discardAudio = function () { chunks.length = 0; byteLength = 0 }
+      handle.takeAudio = function () {
+        if (!byteLength) return undefined
+        var joined = new Uint8Array(byteLength)
+        var offset = 0
+        chunks.forEach(function (chunk) { joined.set(chunk, offset); offset += chunk.length })
+        handle.discardAudio()
+        return { pcm16Base64: bytesToBase64(service.root, joined), sampleRate: WAKE_CAPTURE_SAMPLE_RATE }
+      }
+      Promise.resolve(service.root.navigator.mediaDevices.getUserMedia({ audio: true })).then(function (stream) {
+        captureStream = stream
+        if (closed) { stream.getTracks().forEach(function (track) { track.stop() }); return }
+        var AudioContext = service.root.AudioContext || service.root.webkitAudioContext
+        var AudioWorkletNode = service.root.AudioWorkletNode
+        if (!AudioContext || typeof AudioWorkletNode !== 'function') throw new Error('AudioWorklet is not available for wake capture')
+        var context = new AudioContext()
+        captureContext = context
+        return context.audioWorklet.addModule(service.basePath + '/audio-input-worklet.js').then(function () {
+          if (closed) { stream.getTracks().forEach(function (track) { track.stop() }); context.close(); return }
+          var input = context.createMediaStreamSource(stream)
+          var processor = new AudioWorkletNode(context, AUDIO_INPUT_WORKLET_NAME, {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+            processorOptions: { chunkFrames: 2048 },
+          })
+          var mute = context.createGain()
+          mute.gain.value = 0
+          input.connect(processor)
+          processor.connect(mute)
+          mute.connect(context.destination)
+          processor.port.onmessage = function (event) {
+            if (closed) return
+            var payload = object(event.data)
+            var samples = payload.samples
+            if (!samples || typeof samples.length !== 'number') return
+            var pcm = downsamplePCM(samples, Number(payload.sampleRate) || context.sampleRate, WAKE_CAPTURE_SAMPLE_RATE)
+            var chunk = new Uint8Array(pcm.buffer.slice(0))
+            chunks.push(chunk)
+            byteLength += chunk.length
+            while (byteLength > maxBytes && chunks.length > 1) byteLength -= chunks.shift().length
+          }
+          captureCleanup = function () {
+            captureCleanup = null
+            processor.port.onmessage = null
+            processor.disconnect()
+            mute.disconnect()
+            input.disconnect()
+            stream.getTracks().forEach(function (track) { track.stop() })
+            context.close()
+            captureStream = null
+            captureContext = null
+          }
+        })
+      }).catch(function (error) {
+        if (captureStream) captureStream.getTracks().forEach(function (track) { track.stop() })
+        if (captureContext) captureContext.close()
+        captureStream = null
+        captureContext = null
+        if (!closed && typeof options.onCaptureError === 'function') options.onCaptureError(errorEvent('wake_capture_failed', errorMessage(error), true))
+      })
     }
     recognition.onresult = function (event) {
       if (closed) return

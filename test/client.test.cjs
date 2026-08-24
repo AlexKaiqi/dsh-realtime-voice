@@ -301,13 +301,18 @@ test('OpenAI startup replays readiness, interrupts playback, and cleans resource
   }
   service.basePath = '/dsh-realtime-voice'
   service.handles = new Set()
-  const handle = await service.startConversation({ protocol: 'openai-webrtc', profileId: 'session-assistant', ownerId: 'session-assistant:s1' })
+  const handle = await service.startConversation({ protocol: 'openai-webrtc', profileId: 'session-assistant', ownerId: 'session-assistant:s1', initialUserText: '继续完成部署' })
   const events = []
   handle.subscribe(event => events.push(event))
   assert.deepEqual(events, [
     { type: 'phase', phase: 'connecting' },
     { type: 'status', connected: true, status: 'ready' },
-    { type: 'phase', phase: 'listening' },
+    { type: 'phase', phase: 'thinking' },
+    { type: 'transcript', role: 'input', source: 'input', text: '继续完成部署', final: true },
+  ])
+  assert.deepEqual(sent.slice(0, 2), [
+    { type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '继续完成部署' }] } },
+    { type: 'response.create' },
   ])
   peer.ontrack({ streams: [remoteStream] })
   assert.equal(audio.srcObject, remoteStream)
@@ -404,7 +409,7 @@ test('missing microphone surfaces as a normalized mic_not_found rejection', asyn
   assert.equal(service.handles.size, 0)
 })
 
-test('doubao duplex drops the OpenAI-only response.create after a tool result', async () => {
+test('doubao duplex submits initial user text once but drops the OpenAI-only response.create after a tool result', async () => {
   const sent = []
   let socket
   class WSocket {
@@ -426,13 +431,18 @@ test('doubao duplex drops the OpenAI-only response.create after a tool result', 
   }
   service.basePath = '/dsh-realtime-voice'
   service.handles = new Set()
-  const handle = await service.startConversation({ protocol: 'doubao-realtime-duplex', outputOnly: true })
+  const handle = await service.startConversation({ protocol: 'doubao-realtime-duplex', outputOnly: true, initialUserText: '打开项目状态' })
+  const events = []
+  handle.subscribe(event => events.push(event))
   socket.onopen()
+  socket.onmessage({ data: JSON.stringify({ type: 'session.ready' }) })
   handle.resolveAction('call-1', { ok: true })
   assert.deepEqual(sent, [
     { type: 'session.start' },
+    { type: 'input.text', text: '打开项目状态' },
     { type: 'tool.result', call_id: 'call-1', output: '{"ok":true}' },
   ])
+  assert.equal(events.some(event => event.type === 'transcript' && event.text === '打开项目状态' && event.final), true)
   assert.equal(sent.some(event => event.type === 'response.create'), false)
   handle.end()
 })
