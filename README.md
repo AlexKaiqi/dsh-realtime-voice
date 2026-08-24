@@ -8,6 +8,13 @@ The public product abstraction is deliberately small: a consumer starts a **voic
 
 ## Product boundary
 
+This release targets DeepSeek Harness `0.1.1-rc.2`. `dsh-multi-model-provider@^0.1.0-rc.11` is required and must be installed directly in the same profile. DSH does not auto-install, activate, or update peer plugins.
+
+```sh
+dsh plugin --profile web add dsh-multi-model-provider dsh-realtime-voice
+dsh plugin --profile web update dsh-multi-model-provider dsh-realtime-voice
+```
+
 ```text
 Agent (owned by the product)
 └── Voice conversation (owned here)

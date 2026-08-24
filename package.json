@@ -1,6 +1,6 @@
 {
   "name": "dsh-realtime-voice",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Provider-neutral full-duplex voice Agent capability for DeepSeek Harness.",
   "type": "module",
   "main": "./dsh/index.js",
@@ -12,17 +12,19 @@
   },
   "files": ["dsh", "client", "spec", "cordis.patch.yml", "plugin-spec.json", "README.md", "LICENSE"],
   "license": "MIT",
-  "engines": { "node": ">=20" },
+  "engines": { "node": "^22.19.0 || >=24.0.0" },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
     "ws": "^8.21.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "dsh-multi-model-provider": "^0.1.0-rc.9"
+    "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.2",
+    "dsh-multi-model-provider": "^0.1.0-rc.11"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.2",
     "dsh-multi-model-provider": "link:../dsh-multi-model-provider",
     "playwright": "^1.62.1"
   },
@@ -46,7 +48,7 @@
         "en": "Lets products start interruptible, action-capable full-duplex voice conversations with an Agent over GPT Realtime or Doubao Duplex."
       },
       "tags": ["voice", "agent", "duplex", "conversation"],
-      "dependencies": ["dsh-multi-model-provider"]
+      "dependencies": ["dsh-multi-model-provider", "@deepseek-ai/dsh-host-webserver"]
     },
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
