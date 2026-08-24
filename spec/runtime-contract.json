@@ -44,7 +44,14 @@
       "registerActions"
     ],
     "startConversationOptions": {
-      "initialUserText": "optional bounded text captured by a wake recognizer; after Provider readiness it is emitted as a finalized input transcript and submitted as the first real user turn"
+      "initialUserText": "optional bounded complete transcript captured by a wake recognizer; emitted as a finalized input transcript after Provider readiness",
+      "initialAudio": "optional bounded in-memory mono PCM16 capture; resampled to the selected Provider input rate and replayed as the first real user turn"
+    },
+    "recognitionCapture": {
+      "option": "captureAudio",
+      "handleMethods": ["takeAudio", "discardAudio"],
+      "maxSeconds": 30,
+      "persistence": false
     },
     "compatibilityMethods": [
       "models",

@@ -77,7 +77,7 @@ Every microphone consumer supplies a bounded `ownerId`. Audio input is an exclus
 
 `voiceAgent.recognize()` is the low-cost standby primitive used by product plugins. It never opens a Realtime Provider session itself. Products remain responsible for matching a wake phrase and calling `startConversation()` only after a match. Browser speech recognition is not described as on-device unless the user agent explicitly guarantees local processing.
 
-When a final transcript matches a configured wake phrase, the product may pass the complete original utterance as bounded `initialUserText`. The Client waits for Provider readiness, emits that preserved text as one finalized input transcript, and submits it as the first real user turn. Unmatched standby transcripts never reach this API.
+For same-utterance wake-up, a product calls `recognize({ captureAudio: true })`. The runtime keeps at most 30 seconds of PCM audio in browser memory; the product discards that buffer after every finalized non-match. On a match it passes both the complete original transcript as bounded `initialUserText` and the captured PCM as `initialAudio`. After Provider readiness, the runtime replays the full audio as the first real user turn, including the wake phrase. The buffer is never persisted, and unmatched audio never reaches a Realtime Provider.
 
 Browser media failures are normalized to stable, consumer-localizable codes on the rejected error (and on `recognize()` error events): `mic_not_found` (no input device), `mic_permission_denied`, `mic_unreadable`, and `mic_aborted`. The raw DOMException message is replaced with one canonical English sentence per code; consumers translate `error.code` into their own language and fall back to the message for unknown codes.
 

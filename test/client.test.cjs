@@ -447,6 +447,89 @@ test('doubao duplex submits initial user text once but drops the OpenAI-only res
   handle.end()
 })
 
+test('doubao duplex replays captured wake PCM before opening the live microphone turn', async () => {
+  const sent = []
+  let socket
+  class WSocket {
+    constructor() { this.readyState = 1; socket = this }
+    send(value) { sent.push(JSON.parse(value)) }
+    close() {}
+  }
+  function AudioContext() { this.currentTime = 0 }
+  AudioContext.prototype.close = function () {}
+  const service = Object.create(VoiceAgentService.prototype)
+  service.root = {
+    atob,
+    btoa,
+    navigator: { mediaDevices: { getUserMedia: async () => { throw new Error('microphone must not be requested') } } },
+    AudioContext,
+    WebSocket: WSocket,
+    location: { protocol: 'http:', host: 'localhost:3080' },
+  }
+  service.basePath = '/dsh-realtime-voice'
+  service.handles = new Set()
+  const pcm24k = Buffer.alloc(4_800 * 2, 1)
+  const handle = await service.startConversation({
+    protocol: 'doubao-realtime-duplex',
+    outputOnly: true,
+    initialUserText: '你好小宠物，继续任务',
+    initialAudio: { pcm16Base64: pcm24k.toString('base64'), sampleRate: 24_000 },
+  })
+  const events = []
+  handle.subscribe(event => events.push(event))
+  socket.onopen()
+  socket.onmessage({ data: JSON.stringify({ type: 'session.ready' }) })
+  const audioEvents = sent.filter(event => event.type === 'input_audio_buffer.append')
+  assert.equal(audioEvents.length, 2)
+  assert.equal(audioEvents.reduce((sum, event) => sum + Buffer.from(event.audio, 'base64').length, 0), 6_400)
+  assert.equal(sent.at(-1).type, 'input_audio_buffer.commit')
+  assert.equal(events.some(event => event.type === 'transcript' && event.text === '你好小宠物，继续任务' && event.final), true)
+  handle.end()
+})
+
+test('wake recognition captures bounded PCM in memory and supports take/discard lifecycle', async () => {
+  let processor
+  const track = { stop() { this.stopped = true } }
+  class Recognition { start() {} stop() { this.stopped = true } }
+  function AudioContext() {
+    this.sampleRate = 48_000
+    this.destination = {}
+    this.audioWorklet = { addModule: async () => {} }
+  }
+  AudioContext.prototype.createMediaStreamSource = function () { return { connect() {}, disconnect() {} } }
+  AudioContext.prototype.createGain = function () { return { gain: { value: 1 }, connect() {}, disconnect() {} } }
+  AudioContext.prototype.close = function () { this.closed = true }
+  class AudioWorkletNode {
+    constructor() { this.port = { onmessage: null }; processor = this }
+    connect() {}
+    disconnect() {}
+  }
+  const service = Object.create(VoiceAgentService.prototype)
+  service.root = {
+    btoa,
+    SpeechRecognition: Recognition,
+    AudioContext,
+    AudioWorkletNode,
+    navigator: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track] }) } },
+  }
+  service.basePath = '/dsh-realtime-voice'
+  service.auxiliary = new Set()
+  service.inputLease = null
+  const handle = service.recognize({ ownerId: 'pet-assistant:standby', captureAudio: true })
+  await new Promise(resolve => setImmediate(resolve))
+  processor.port.onmessage({ data: { samples: new Float32Array(4_800).fill(.25), sampleRate: 48_000 } })
+  const captured = handle.takeAudio()
+  assert.equal(captured.sampleRate, 24_000)
+  assert.equal(Buffer.from(captured.pcm16Base64, 'base64').length, 4_800)
+  assert.equal(handle.takeAudio(), undefined)
+  processor.port.onmessage({ data: { samples: new Float32Array(480).fill(.25), sampleRate: 48_000 } })
+  handle.discardAudio()
+  assert.equal(handle.takeAudio(), undefined)
+  handle.close()
+  assert.equal(track.stopped, true)
+  assert.equal(service.inputLease, null)
+})
+
 test('browser recognition error codes normalize to the same mic codes', () => {
   const recognitions = []
   class Recognition {
