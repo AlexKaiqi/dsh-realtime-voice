@@ -68,7 +68,7 @@ test('a product-owned same-origin gateway keeps authorization data on its own ro
   }
   function AudioContext() { this.currentTime = 0; this.sampleRate = 48000; this.destination = {}; this.audioWorklet = { addModule: async path => modules.push(path) } }
   AudioContext.prototype.createBuffer = function (_channels, length) { return { getChannelData: () => new Float32Array(length), duration: .02 } }
-  AudioContext.prototype.createBufferSource = function () { const source = { connect() {}, start() {}, onended: null }; sources.push(source); return source }
+  AudioContext.prototype.createBufferSource = function () { const source = { connect() {}, start(at) { this.startedAt = at }, onended: null }; sources.push(source); return source }
   AudioContext.prototype.createMediaStreamSource = function () { return { connect() {}, disconnect() {} } }
   AudioContext.prototype.createGain = function () { return { gain: { value: 1 }, connect() {}, disconnect() {} } }
   AudioContext.prototype.close = function () {}
@@ -115,8 +115,18 @@ test('a product-owned same-origin gateway keeps authorization data on its own ro
   const pcm = Buffer.alloc(8); pcm.writeInt16LE(16384, 0); pcm.writeInt16LE(-16384, 2); pcm.writeInt16LE(8192, 4); pcm.writeInt16LE(-8192, 6)
   socket.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta', delta: pcm.toString('base64') }) })
   assert.equal(events.some(event => event.type === 'audio-level' && event.source === 'output' && event.level > 0), true)
+  assert.equal(sources.at(-1).startedAt, .12)
+  assert.notEqual(handle.outputIdleTimer, null, 'a missing provider done event has a queue-aware idle fallback')
+  const listeningBeforeDone = events.filter(event => event.type === 'phase' && event.phase === 'listening').length
+  socket.onmessage({ data: JSON.stringify({ type: 'response.output_audio.done' }) })
+  assert.equal(handle.outputIdleTimer, null)
+  assert.equal(events.filter(event => event.type === 'phase' && event.phase === 'listening').length, listeningBeforeDone, 'provider completion waits for queued browser audio')
   sources.at(-1).onended()
-  assert.deepEqual(events.at(-1), { type: 'audio-level', source: 'output', level: 0 })
+  assert.equal(events.filter(event => event.type === 'phase' && event.phase === 'listening').length, listeningBeforeDone + 1)
+  assert.deepEqual(events.slice(-2), [
+    { type: 'audio-level', source: 'output', level: 0 },
+    { type: 'phase', phase: 'listening' },
+  ])
   handle.interrupt()
   assert.deepEqual(sent.at(-1), { version: 1, type: 'response.cancel' })
   handle.end()
@@ -139,6 +149,60 @@ test('rejects cross-origin or protocol-relative product gateway paths', async ()
     () => service.startConversation({ protocol: 'doubao-realtime-duplex', outputOnly: true, gateway: { path: '//evil.example/voice', start: { type: 'session.start' } } }),
     /same-origin absolute path/,
   )
+})
+
+test('interactive Doubao preview gates the live microphone until its injected cue is committed', async () => {
+  const sent = []
+  let socket
+  let processor
+  let microphoneRequests = 0
+  class WSocket {
+    constructor() { this.readyState = 1; socket = this }
+    send(value) { sent.push(JSON.parse(value)) }
+    close() {}
+  }
+  function AudioContext() {
+    this.currentTime = 0
+    this.sampleRate = 48_000
+    this.destination = {}
+    this.audioWorklet = { addModule: async () => {} }
+  }
+  AudioContext.prototype.createMediaStreamSource = function () { return { connect() {}, disconnect() {} } }
+  AudioContext.prototype.createGain = function () { return { gain: { value: 1 }, connect() {}, disconnect() {} } }
+  AudioContext.prototype.close = function () {}
+  class AudioWorkletNode {
+    constructor() { this.port = { onmessage: null }; processor = this }
+    connect() {}
+    disconnect() {}
+  }
+  const service = Object.create(VoiceAgentService.prototype)
+  service.root = {
+    navigator: { mediaDevices: { getUserMedia: async () => { microphoneRequests += 1; return { getTracks: () => [{ stop() {} }] } } } },
+    AudioContext,
+    AudioWorkletNode,
+    WebSocket: WSocket,
+    location: { protocol: 'http:', host: 'localhost:3080' },
+    btoa,
+  }
+  service.basePath = '/dsh-realtime-voice'
+  service.handles = new Set()
+  service.inputLease = null
+  const handle = await service.startConversation({
+    protocol: 'doubao-realtime-duplex',
+    ownerId: 'session-assistant:preview',
+    previewText: '请先打个招呼',
+  })
+  socket.onopen()
+  socket.onmessage({ data: JSON.stringify({ type: 'session.ready' }) })
+  assert.equal(microphoneRequests, 1)
+  assert.equal(sent.at(-1).type, 'preview.speak')
+  const frame = { data: { samples: new Float32Array(480).fill(.1), sampleRate: 48_000 } }
+  processor.port.onmessage(frame)
+  assert.equal(sent.some(event => event.type === 'input_audio_buffer.append'), false, 'live input cannot overlap the injected cue')
+  socket.onmessage({ data: JSON.stringify({ type: 'preview.input_committed' }) })
+  processor.port.onmessage(frame)
+  assert.equal(sent.at(-1).type, 'input_audio_buffer.append', 'live input maintains the duplex clock after the cue')
+  handle.end()
 })
 
 test('exports the browser websocket subprotocol used by the Host authorization fence', () => {
@@ -169,6 +233,7 @@ test('normalizes provider events to the public service contract', () => {
   assert.deepEqual(normalizeProviderEvent('doubao-realtime-duplex', { type: 'session.ready' }), { type: 'status', connected: true, status: 'ready' })
   assert.deepEqual(normalizeProviderEvent('openai-webrtc', { type: 'input_audio_buffer.speech_started' }), { type: 'phase', phase: 'listening' })
   assert.deepEqual(normalizeProviderEvent('openai-webrtc', { type: 'response.created' }), { type: 'phase', phase: 'thinking' })
+  assert.deepEqual(normalizeProviderEvent('openai-webrtc', { type: 'response.output_audio.started' }), { type: 'phase', phase: 'speaking' })
   assert.deepEqual(normalizeProviderEvent('openai-webrtc', { type: 'response.output_audio.delta' }), { type: 'phase', phase: 'speaking' })
   assert.deepEqual(normalizeProviderEvent('openai-webrtc', { type: 'conversation.item.input_audio_transcription.completed', transcript: 'hello' }), { type: 'transcript', role: 'input', source: 'input', text: 'hello', final: true })
   assert.deepEqual(normalizeProviderEvent('doubao-realtime-duplex', { type: 'conversation.item.input_audio_transcription.delta', delta: 'hel' }), { type: 'transcript', role: 'input', source: 'input', text: 'hel', final: false })

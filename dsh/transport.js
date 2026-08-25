@@ -457,12 +457,16 @@ function registerDoubaoUpgrade(scope, service, path, policy) {
             trace('browser→upstream', outgoing.type + (outgoing.call_id ? ':' + outgoing.call_id : ''))
             return upstream.send(JSON.stringify(outgoing))
           }
+          const intervalMs = message.type === 'preview.speak' ? 20 : 100
           outgoing.forEach((event, index) => setTimeout(() => {
             if (upstream?.readyState === WebSocket.OPEN) {
               trace('browser→upstream', event.type)
               upstream.send(JSON.stringify(event))
+              if (message.type === 'preview.speak' && index === outgoing.length - 1 && browser.readyState === WebSocket.OPEN) {
+                browser.send(JSON.stringify({ type: 'preview.input_committed' }))
+              }
             }
-          }, index * 100))
+          }, index * intervalMs))
         }
         const begin = async message => {
           starting = true

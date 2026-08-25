@@ -127,7 +127,7 @@ test('accepts exactly one result for each pending upstream tool call', () => {
   assert.throws(() => safeUpstreamEvent({ type: 'tool.result', call_id: 'unknown', output: 'no' }, state, service), /pending/)
 })
 
-test('maps a provider-neutral preview to a fixed microphone-free Doubao audio turn', () => {
+test('maps a provider-neutral preview to a bounded microphone-free Doubao audio turn', () => {
   const events = safeUpstreamEvent({ type: 'preview.speak', text: '你好，我是试听声音。' }, { pendingToolCalls: new Set() }, {})
   assert.equal(events.length, 21)
   assert.equal(events.at(-1).type, 'input_audio_buffer.commit')

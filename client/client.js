@@ -39,6 +39,8 @@
   var MAX_WAKE_CAPTURE_SECONDS = 30
   var WAKE_CAPTURE_PREROLL_SECONDS = 4
   var AUDIO_PACKET_BYTES = 3200
+  var DOUBAO_PLAYBACK_PREBUFFER_SECONDS = 0.12
+  var DOUBAO_OUTPUT_IDLE_GRACE_MS = 3500
   /** Defensive ceiling for async tool executors that never settle. */
   var DEFAULT_TOOL_TIMEOUT_MS = 300000
 
@@ -421,14 +423,47 @@
     source.buffer = buffer
     source.connect(context.destination)
     var now = context.currentTime
-    handle.playAt = Math.max(handle.playAt || now, now)
+    // Keep a small queue ahead of the hardware clock. Doubao commonly delivers
+    // several PCM frames in bursts; starting each burst immediately exposes
+    // normal network jitter as audible gaps. Re-buffer after a real underrun.
+    if (!Number.isFinite(handle.playAt) || handle.playAt <= now) handle.playAt = now + DOUBAO_PLAYBACK_PREBUFFER_SECONDS
     source.start(handle.playAt)
     handle.playAt += buffer.duration
     handle.sources.add(source)
+    armDoubaoIdleCompletion(handle)
     source.onended = handle.guard(function () {
       handle.sources.delete(source)
-      if (!handle.sources.size) handle.emit(outputLevelEvent(0))
+      if (!handle.sources.size) {
+        handle.emit(outputLevelEvent(0))
+        finishDoubaoPlayback(handle)
+      }
     })
+  }
+
+  function clearDoubaoIdleCompletion(handle) {
+    if (handle.outputIdleTimer !== null && handle.outputIdleTimer !== undefined) clearTimeout(handle.outputIdleTimer)
+    handle.outputIdleTimer = null
+  }
+
+  function armDoubaoIdleCompletion(handle) {
+    clearDoubaoIdleCompletion(handle)
+    var context = handle.audioContext
+    var queuedMs = context ? Math.max(0, ((handle.playAt || context.currentTime) - context.currentTime) * 1000) : 0
+    // Some Doubao routes never emit output_audio.done. Treat a sufficiently
+    // long provider silence as completion, but never before every scheduled
+    // browser buffer has had time to play. New PCM always resets this timer.
+    handle.outputIdleTimer = setTimeout(handle.guard(function () {
+      handle.outputIdleTimer = null
+      handle.outputDone = true
+      finishDoubaoPlayback(handle)
+    }), Math.max(DOUBAO_OUTPUT_IDLE_GRACE_MS, queuedMs + 750))
+  }
+
+  function finishDoubaoPlayback(handle) {
+    if (!handle.outputDone || handle.sources.size || handle.outputCompletionEmitted) return
+    clearDoubaoIdleCompletion(handle)
+    handle.outputCompletionEmitted = true
+    handle.emit({ type: 'phase', phase: 'listening' })
   }
 
   function gatewayOptions(value) {
@@ -466,11 +501,24 @@
       handle.audioContext = context
       handle.sources = new Set()
       handle.sessionReady = false
+      handle.outputDone = false
+      handle.outputCompletionEmitted = false
+      handle.outputIdleTimer = null
+      handle.previewCuePending = !!options.previewText
+      handle.previewCueTimer = null
+      handle.own(function () { clearDoubaoIdleCompletion(handle) })
+      handle.own(function () {
+        if (handle.previewCueTimer !== null) clearTimeout(handle.previewCueTimer)
+        handle.previewCueTimer = null
+      })
       handle.own(function () { context.close() })
       handle.cancelPlayback = function () {
         handle.sources.forEach(function (source) { try { source.stop() } catch (_) {} })
         handle.sources.clear()
         handle.playAt = context.currentTime
+        handle.outputDone = false
+        handle.outputCompletionEmitted = true
+        clearDoubaoIdleCompletion(handle)
         handle.emit(outputLevelEvent(0))
       }
       handle.own(handle.cancelPlayback)
@@ -509,7 +557,16 @@
           handle.sessionReady = true
           handle.emit({ type: 'status', connected: true, status: 'ready' })
           handle.emit({ type: 'phase', phase: options.previewText || initial || captured ? 'thinking' : 'listening' })
-          if (options.previewText) jsonSend(socket, { type: 'preview.speak', text: text(options.previewText) })
+          if (options.previewText) {
+            jsonSend(socket, { type: 'preview.speak', text: text(options.previewText) })
+            // New bridges explicitly release the microphone after the injected
+            // preview cue is committed. Keep a bounded fallback for compatible
+            // product-owned gateways so an older bridge cannot deadlock input.
+            handle.previewCueTimer = setTimeout(handle.guard(function () {
+              handle.previewCueTimer = null
+              handle.previewCuePending = false
+            }), 1200)
+          }
           else if (captured) {
             if (initial) handle.emit(transcriptEvent('input', initial, true))
             sendInitialPCM(service.root, function (outgoing) { handle.send(outgoing) }, captured)
@@ -524,8 +581,27 @@
           jsonSend(socket, gatewayEvent(gateway, { type: 'response.cancel' }))
           handle.emit({ type: 'interrupted' })
         }
-        if (event.type === 'response.audio.delta' || event.type === 'response.output_audio.delta') schedulePCM(service, handle, text(event.delta))
-        var normalized = normalizeProviderEvent('doubao-realtime-duplex', event)
+        if (event.type === 'preview.input_committed') {
+          if (handle.previewCueTimer !== null) clearTimeout(handle.previewCueTimer)
+          handle.previewCueTimer = null
+          handle.previewCuePending = false
+        }
+        if (event.type === 'response.output_audio.started') {
+          handle.outputDone = false
+          handle.outputCompletionEmitted = false
+        }
+        if (event.type === 'response.audio.delta' || event.type === 'response.output_audio.delta') {
+          handle.outputDone = false
+          handle.outputCompletionEmitted = false
+          schedulePCM(service, handle, text(event.delta))
+        }
+        var outputFinished = event.type === 'response.audio.done' || event.type === 'response.output_audio.done' || event.type === 'response.done'
+        if (outputFinished) {
+          clearDoubaoIdleCompletion(handle)
+          handle.outputDone = true
+          finishDoubaoPlayback(handle)
+        }
+        var normalized = outputFinished || event.type === 'response.output_audio.started' ? null : normalizeProviderEvent('doubao-realtime-duplex', event)
         if (normalized) handle.emit(normalized)
       })
       socket.onerror = handle.guard(function () { handle.emit(errorEvent('websocket_error', 'Doubao Realtime WebSocket failed', true)) })
@@ -549,7 +625,7 @@
         processor.connect(mute)
         mute.connect(context.destination)
         processor.port.onmessage = handle.guard(function (event) {
-          if (socket.readyState !== 1 || !handle.sessionReady) return
+          if (socket.readyState !== 1 || !handle.sessionReady || handle.previewCuePending) return
           var payload = object(event.data)
           var samples = payload.samples
           if (!samples || typeof samples.length !== 'number') return

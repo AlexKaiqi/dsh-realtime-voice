@@ -305,6 +305,16 @@ test('Doubao transport bridges a real local websocket session, audio, context, t
 
     upstreamSocket.send(JSON.stringify({ type: 'response.audio.delta', delta: 'AAA=' }))
     assert.deepEqual(await nextJson(browser), { type: 'response.audio.delta', delta: 'AAA=' })
+
+    browser.send(JSON.stringify({ type: 'preview.speak', text: '请打个招呼' }))
+    let cueEvent
+    let cueFrames = 0
+    do {
+      cueEvent = await nextJson(upstreamSocket)
+      if (cueEvent.type === 'input_audio_buffer.append') cueFrames += 1
+    } while (cueEvent.type !== 'input_audio_buffer.commit')
+    assert.equal(cueFrames > 0, true)
+    assert.deepEqual(await nextJson(browser), { type: 'preview.input_committed' })
   } finally {
     if (browser.readyState !== WebSocket.CLOSED) {
       const closed = once(browser, 'close')
