@@ -41,6 +41,13 @@
   var AUDIO_PACKET_BYTES = 3200
   var DOUBAO_PLAYBACK_PREBUFFER_SECONDS = 0.12
   var DOUBAO_OUTPUT_IDLE_GRACE_MS = 3500
+  // Browser-side barge-in is deliberately conservative: getUserMedia's echo
+  // cancellation removes most speaker leakage, then four sustained worklet
+  // frames distinguish a spoken interruption from a click or short transient.
+  // Provider VAD remains authoritative and can interrupt even sooner.
+  var BARGE_IN_RMS_FLOOR = 0.025
+  var BARGE_IN_NOISE_MULTIPLIER = 2.5
+  var BARGE_IN_CONSECUTIVE_FRAMES = 4
   /** Defensive ceiling for async tool executors that never settle. */
   var DEFAULT_TOOL_TIMEOUT_MS = 300000
 
@@ -195,6 +202,33 @@
     return Math.min(1, Math.sqrt(sum / pcm.length) * 2.4)
   }
 
+  function float32RMS(samples) {
+    if (!samples || !samples.length) return 0
+    var sum = 0
+    for (var i = 0; i < samples.length; i += 1) {
+      var sample = Number(samples[i]) || 0
+      sum += sample * sample
+    }
+    return Math.sqrt(sum / samples.length)
+  }
+
+  function observeBargeIn(handle, samples) {
+    var level = float32RMS(samples)
+    if (!handle.outputActive || handle.playbackSuppressed) {
+      handle.bargeInFrames = 0
+      // Never learn active speech as the room baseline. The capped moving
+      // average only adapts the threshold to quiet background noise.
+      handle.inputNoiseFloor = (handle.inputNoiseFloor || 0.005) * 0.96 + Math.min(level, 0.015) * 0.04
+      return false
+    }
+    var threshold = Math.max(BARGE_IN_RMS_FLOOR, (handle.inputNoiseFloor || 0.005) * BARGE_IN_NOISE_MULTIPLIER)
+    handle.bargeInFrames = level >= threshold ? (handle.bargeInFrames || 0) + 1 : 0
+    if (handle.bargeInFrames < BARGE_IN_CONSECUTIVE_FRAMES) return false
+    handle.bargeInFrames = 0
+    handle.interrupt()
+    return true
+  }
+
   function normalizeProviderEvent(protocol, event) {
     event = object(event)
     var type = text(event.type)
@@ -237,6 +271,10 @@
     this.send = null
     this.cancelPlayback = null
     this.resumePlayback = null
+    this.outputActive = false
+    this.playbackSuppressed = false
+    this.inputNoiseFloor = 0.005
+    this.bargeInFrames = 0
     this.hasSubscriber = false
     this.pendingEvents = []
   }
@@ -272,6 +310,9 @@
   VoiceConversation.prototype.resolveTool = VoiceConversation.prototype.resolveAction
   VoiceConversation.prototype.interrupt = function () {
     if (this.closed) return
+    this.outputActive = false
+    this.playbackSuppressed = true
+    this.bargeInFrames = 0
     if (typeof this.cancelPlayback === 'function') this.cancelPlayback()
     if (this.send) this.sendEvent({ type: 'response.cancel' })
     this.emit({ type: 'interrupted' })
@@ -294,8 +335,30 @@
   VoiceConversation.prototype.close = VoiceConversation.prototype.end
 
   function openAIEvent(handle, event) {
+    var type = text(object(event).type)
+    if (type === 'response.created') {
+      handle.playbackSuppressed = false
+      handle.bargeInFrames = 0
+    }
+    var outputStarted = type === 'response.audio.delta' || type === 'response.output_audio.delta' || type === 'response.output_audio.started'
+    var outputFinished = type === 'response.audio.done' || type === 'response.output_audio.done' || type === 'response.done'
+    if (type === 'input_audio_buffer.speech_started') {
+      var interrupted = handle.outputActive
+      handle.outputActive = false
+      handle.playbackSuppressed = true
+      handle.bargeInFrames = 0
+      if (typeof handle.cancelPlayback === 'function') handle.cancelPlayback()
+      // OpenAI's session is configured with interrupt_response:true, so the
+      // server already cancels generation for this VAD event. Sending a second
+      // response.cancel races that cancellation and can yield a false error.
+      if (interrupted) handle.emit({ type: 'interrupted' })
+    }
+    if (outputStarted && handle.playbackSuppressed) return
+    if (outputStarted) handle.outputActive = true
+    if (outputFinished) handle.outputActive = false
     var normalized = normalizeProviderEvent('openai-webrtc', event)
-    if (normalized && normalized.type === 'phase' && normalized.phase === 'speaking' && typeof handle.resumePlayback === 'function') handle.resumePlayback()
+    if (normalized && normalized.type === 'phase' && normalized.phase === 'speaking' && !handle.playbackSuppressed && typeof handle.resumePlayback === 'function') handle.resumePlayback()
+    if (normalized && normalized.type === 'interrupted' && handle.playbackSuppressed) return
     if (normalized) handle.emit(normalized)
   }
 
@@ -306,7 +369,7 @@
     try {
       var outputOnly = options.outputOnly === true
       if (!outputOnly) handle.own(service.acquireInput(options.ownerId))
-      var stream = outputOnly ? null : await service.root.navigator.mediaDevices.getUserMedia({ audio: true })
+      var stream = outputOnly ? null : await service.root.navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
       if (handle.closed) { if (stream) stream.getTracks().forEach(function (track) { track.stop() }); return handle }
       if (stream) handle.own(function () { stream.getTracks().forEach(function (track) { track.stop() }) })
       var peer = new service.root.RTCPeerConnection()
@@ -463,6 +526,8 @@
     if (!handle.outputDone || handle.sources.size || handle.outputCompletionEmitted) return
     clearDoubaoIdleCompletion(handle)
     handle.outputCompletionEmitted = true
+    handle.outputActive = false
+    handle.bargeInFrames = 0
     handle.emit({ type: 'phase', phase: 'listening' })
   }
 
@@ -493,7 +558,7 @@
     try {
       var outputOnly = options.outputOnly === true
       if (!outputOnly) handle.own(service.acquireInput(options.ownerId))
-      var stream = outputOnly ? null : await service.root.navigator.mediaDevices.getUserMedia({ audio: true })
+      var stream = outputOnly ? null : await service.root.navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
       if (stream) handle.own(function () { stream.getTracks().forEach(function (track) { track.stop() }) })
       var AudioContext = service.root.AudioContext || service.root.webkitAudioContext
       if (!AudioContext) throw new Error('AudioContext is not available')
@@ -518,6 +583,8 @@
         handle.playAt = context.currentTime
         handle.outputDone = false
         handle.outputCompletionEmitted = true
+        handle.outputActive = false
+        handle.bargeInFrames = 0
         clearDoubaoIdleCompletion(handle)
         handle.emit(outputLevelEvent(0))
       }
@@ -576,10 +643,12 @@
             handle.send({ type: 'input.text', text: initial })
           }
         }
-        if ((event.type === 'input_audio_buffer.speech_started' || event.type === 'conversation.item.input_audio_transcription.started') && handle.sources.size) {
-          handle.cancelPlayback()
-          jsonSend(socket, gatewayEvent(gateway, { type: 'response.cancel' }))
-          handle.emit({ type: 'interrupted' })
+        if (event.type === 'response.created') {
+          handle.playbackSuppressed = false
+          handle.bargeInFrames = 0
+        }
+        if ((event.type === 'input_audio_buffer.speech_started' || event.type === 'conversation.item.input_audio_transcription.started') && handle.outputActive) {
+          handle.interrupt()
         }
         if (event.type === 'preview.input_committed') {
           if (handle.previewCueTimer !== null) clearTimeout(handle.previewCueTimer)
@@ -587,10 +656,14 @@
           handle.previewCuePending = false
         }
         if (event.type === 'response.output_audio.started') {
+          if (handle.playbackSuppressed) return
+          handle.outputActive = true
           handle.outputDone = false
           handle.outputCompletionEmitted = false
         }
         if (event.type === 'response.audio.delta' || event.type === 'response.output_audio.delta') {
+          if (handle.playbackSuppressed) return
+          handle.outputActive = true
           handle.outputDone = false
           handle.outputCompletionEmitted = false
           schedulePCM(service, handle, text(event.delta))
@@ -629,6 +702,7 @@
           var payload = object(event.data)
           var samples = payload.samples
           if (!samples || typeof samples.length !== 'number') return
+          observeBargeIn(handle, samples)
           var inputRate = Number(payload.sampleRate) || context.sampleRate
           var pcm = downsamplePCM(samples, inputRate, 16000)
           jsonSend(socket, gatewayEvent(gateway, { type: 'input_audio_buffer.append', audio: bytesToBase64(service.root, new Uint8Array(pcm.buffer)) }))

@@ -68,7 +68,7 @@ test('a product-owned same-origin gateway keeps authorization data on its own ro
   }
   function AudioContext() { this.currentTime = 0; this.sampleRate = 48000; this.destination = {}; this.audioWorklet = { addModule: async path => modules.push(path) } }
   AudioContext.prototype.createBuffer = function (_channels, length) { return { getChannelData: () => new Float32Array(length), duration: .02 } }
-  AudioContext.prototype.createBufferSource = function () { const source = { connect() {}, start(at) { this.startedAt = at }, onended: null }; sources.push(source); return source }
+  AudioContext.prototype.createBufferSource = function () { const source = { connect() {}, start(at) { this.startedAt = at }, stop() { this.stopped = true }, onended: null }; sources.push(source); return source }
   AudioContext.prototype.createMediaStreamSource = function () { return { connect() {}, disconnect() {} } }
   AudioContext.prototype.createGain = function () { return { gain: { value: 1 }, connect() {}, disconnect() {} } }
   AudioContext.prototype.close = function () {}
@@ -127,8 +127,24 @@ test('a product-owned same-origin gateway keeps authorization data on its own ro
     { type: 'audio-level', source: 'output', level: 0 },
     { type: 'phase', phase: 'listening' },
   ])
-  handle.interrupt()
-  assert.deepEqual(sent.at(-1), { version: 1, type: 'response.cancel' })
+  // A sustained local microphone onset interrupts queued output without a
+  // button or a round trip to Provider VAD. Late frames from the cancelled
+  // response stay suppressed until the next response begins.
+  socket.onmessage({ data: JSON.stringify({ type: 'response.created' }) })
+  socket.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta', delta: pcm.toString('base64') }) })
+  const interruptedSource = sources.at(-1)
+  const sentBeforeBargeIn = sent.length
+  for (let index = 0; index < 4; index += 1) processor.port.onmessage({ data: { samples: new Float32Array(2048).fill(.1), sampleRate: 48_000 } })
+  assert.equal(sent.slice(sentBeforeBargeIn).some(event => event.version === 1 && event.type === 'response.cancel'), true)
+  assert.equal(sent.at(-1).type, 'input_audio_buffer.append', 'the interrupting utterance keeps streaming after cancellation')
+  assert.equal(interruptedSource.stopped, true)
+  assert.equal(events.some(event => event.type === 'interrupted'), true)
+  const sourceCount = sources.length
+  socket.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta', delta: pcm.toString('base64') }) })
+  assert.equal(sources.length, sourceCount, 'cancelled response audio cannot restart playback')
+  socket.onmessage({ data: JSON.stringify({ type: 'response.created' }) })
+  socket.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta', delta: pcm.toString('base64') }) })
+  assert.equal(sources.length, sourceCount + 1, 'the next response can play normally')
   handle.end()
   assert.equal(processor.port.onmessage, null)
 })
@@ -381,9 +397,14 @@ test('OpenAI startup replays readiness, interrupts playback, and cleans resource
   ])
   peer.ontrack({ streams: [remoteStream] })
   assert.equal(audio.srcObject, remoteStream)
-  handle.interrupt()
+  channel.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta' }) })
+  channel.onmessage({ data: JSON.stringify({ type: 'input_audio_buffer.speech_started' }) })
   assert.equal(audio.srcObject, null)
-  assert.equal(sent.at(-1).type, 'response.cancel')
+  assert.equal(sent.some(event => event.type === 'response.cancel'), false, 'server VAD already owns OpenAI response cancellation')
+  assert.equal(events.some(event => event.type === 'interrupted'), true)
+  channel.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta' }) })
+  assert.equal(audio.srcObject, null, 'late cancelled audio cannot resume playback')
+  channel.onmessage({ data: JSON.stringify({ type: 'response.created' }) })
   channel.onmessage({ data: JSON.stringify({ type: 'response.output_audio.delta' }) })
   assert.equal(audio.srcObject, remoteStream)
   handle.end()
