@@ -44,6 +44,7 @@
           "normalizeProviderEvent",
           "VoiceConversation",
           "startConversation",
+          "uploadCapturedAudio",
           "registerActions"
         ]
       }

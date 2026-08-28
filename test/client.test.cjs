@@ -27,6 +27,24 @@ test('the standalone browser script publishes a usable global without the DSH mo
   service.dispose()
 })
 
+test('uploads composed capture as bounded binary PCM instead of RPC base64', async () => {
+  let request
+  const service = Object.create(VoiceAgentService.prototype)
+  service.basePath = '/voice'
+  service.root = {
+    atob(value) { return Buffer.from(value, 'base64').toString('binary') },
+    async fetch(url, options) {
+      request = { url, options }
+      return { ok: true, async json() { return { id: '123e4567-e89b-12d3-a456-426614174000' } } }
+    },
+  }
+  const result = await service.uploadCapturedAudio({ pcm16Base64: Buffer.from([1, 0, 2, 0]).toString('base64'), sampleRate: 16000 })
+  assert.equal(request.url, '/voice/artifacts/input')
+  assert.equal(request.options.headers['X-Dsh-Voice-Artifact'], '1')
+  assert.deepEqual(Buffer.from(request.options.body), Buffer.from([1, 0, 2, 0]))
+  assert.deepEqual(result, { id: '123e4567-e89b-12d3-a456-426614174000', sampleRate: 16000, channels: 1, format: 'pcm_s16le' })
+})
+
 test('the Doubao input worklet batches transferable Float32 microphone frames', () => {
   const source = readFileSync(require.resolve('../client/audio-input-worklet.js'), 'utf8')
   let name

@@ -947,6 +947,21 @@
     if (!response.ok) throw new Error(text(body.error) || 'Unable to list Realtime voice models')
     return Array.isArray(body.models) ? body.models : []
   }
+  /** Upload one bounded captured utterance as raw PCM; RPC receives only the opaque artifact id. */
+  VoiceAgentService.prototype.uploadCapturedAudio = async function (audio, signal) {
+    var input = object(audio)
+    if (Number(input.sampleRate) !== 16000) throw new Error('Composed voice capture must use 16kHz PCM')
+    var pcm = base64ToInt16(this.root, text(input.pcm16Base64))
+    if (!pcm.length || pcm.byteLength > 16000 * 15 * 2) throw new Error('Composed voice capture must contain at most 15 seconds')
+    var response = await this.root.fetch(this.basePath + '/artifacts/input', {
+      method: 'POST', signal: signal,
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Dsh-Voice-Artifact': '1', 'X-Dsh-Audio-Sample-Rate': '16000' },
+      body: new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength),
+    })
+    var body = await response.json()
+    if (!response.ok || typeof body.id !== 'string') throw new Error(text(body.error) || 'Unable to upload captured audio')
+    return { id: body.id, sampleRate: 16000, channels: 1, format: 'pcm_s16le' }
+  }
   VoiceAgentService.prototype.acquireInput = function (ownerId, options) {
     var service = this
     var normalized = text(ownerId).trim().slice(0, 120) || 'legacy-consumer'

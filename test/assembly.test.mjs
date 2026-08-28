@@ -13,6 +13,9 @@ function assemblyHarness() {
       registerAdapter(adapter) { adapters.push(adapter); return () => disposed.push(`adapter:${adapter.id}`) },
       publicModels: async () => [],
     },
+    taskModelRuntime: {
+      registerAdapter(adapter) { adapters.push(adapter); return () => disposed.push(`adapter:${adapter.id}`) },
+    },
     webServer: {
       register(route) { routes.push(route); return () => disposed.push(`route:${route.path}`) },
       registerUpgrade(route) { upgrades.push(route); return () => disposed.push(`upgrade:${route.path}`) },
@@ -21,7 +24,7 @@ function assemblyHarness() {
   }
   const ctx = {
     inject(names, callback) {
-      assert.deepEqual(names, ['webServer', 'realtimeModelRuntime'])
+      assert.deepEqual(names, ['webServer', 'realtimeModelRuntime', 'taskModelRuntime'])
       callback(scope)
     },
   }
@@ -31,8 +34,10 @@ function assemblyHarness() {
 test('registers provider adapters and every existing transport route', () => {
   const harness = assemblyHarness()
   apply(harness.ctx, { enabled: true, basePath: '/dsh-realtime-voice' })
-  assert.deepEqual(harness.adapters.map(adapter => adapter.id), ['openai-webrtc', 'doubao-realtime-duplex'])
+  assert.deepEqual(harness.adapters.map(adapter => adapter.id), ['openai-webrtc', 'doubao-realtime-duplex', 'doubao-speech-agent-plan'])
   assert.deepEqual(harness.routes.map(route => route.path), [
+    '/dsh-realtime-voice/artifacts/input',
+    '/dsh-realtime-voice/artifacts/audio',
     '/dsh-realtime-voice/client.js',
     '/dsh-realtime-voice/audio-input-worklet.js',
     '/dsh-realtime-voice/models',
@@ -50,13 +55,13 @@ test('unload disposes adapters, routes, upgrades, and supports a clean reload', 
   const first = assemblyHarness()
   apply(first.ctx, { enabled: true, basePath: '/dsh-realtime-voice' })
   for (const cleanup of first.cleanups.reverse()) cleanup()
-  assert.equal(first.disposed.filter(value => value.startsWith('adapter:')).length, 2)
-  assert.equal(first.disposed.filter(value => value.startsWith('route:')).length, 9)
+  assert.equal(first.disposed.filter(value => value.startsWith('adapter:')).length, 3)
+  assert.equal(first.disposed.filter(value => value.startsWith('route:')).length, 11)
   assert.equal(first.disposed.filter(value => value.startsWith('upgrade:')).length, 2)
 
   const second = assemblyHarness()
   apply(second.ctx, { enabled: true, basePath: '/dsh-realtime-voice' })
-  assert.equal(second.routes.length, 9)
+  assert.equal(second.routes.length, 11)
   assert.equal(second.upgrades.length, 2)
   for (const cleanup of second.cleanups.reverse()) cleanup()
 })
@@ -64,7 +69,7 @@ test('unload disposes adapters, routes, upgrades, and supports a clean reload', 
 test('keeps the short-lived voice-agent path as an alias for a custom base path', () => {
   const harness = assemblyHarness()
   apply(harness.ctx, { enabled: true, basePath: '/voice' })
-  assert.equal(harness.routes.length, 13)
+  assert.equal(harness.routes.length, 15)
   assert.equal(harness.upgrades.length, 3)
   assert.equal(harness.routes.some(route => route.path === '/dsh-voice-agent/models'), true)
   assert.equal(harness.routes.some(route => route.path === '/dsh-realtime-voice/models'), true)

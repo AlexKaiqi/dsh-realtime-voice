@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 import { voiceAgentAdapters } from './service.js'
 import { registerRealtimeTransport } from './transport.js'
+import { doubaoAgentPlanSpeechAdapter } from './agent-plan-speech.js'
+import { createAudioArtifactStore } from './audio-artifacts.js'
 
 export const name = 'realtime-voice'
 export const inject = []
@@ -37,9 +39,14 @@ export function validateConfig(config) {
 export function apply(ctx, config) {
   validateConfig(config)
   if (config.enabled === false) return
-  ctx.inject(['webServer', 'realtimeModelRuntime'], scope => {
-    const disposers = voiceAgentAdapters().map(adapter => scope.realtimeModelRuntime.registerAdapter(adapter))
-    if (disposers.some(dispose => typeof dispose !== 'function')) throw new Error('Realtime adapter registration must return a disposer')
+  ctx.inject(['webServer', 'realtimeModelRuntime', 'taskModelRuntime'], scope => {
+    const audioArtifacts = createAudioArtifactStore(config.basePath)
+    const disposers = [
+      ...voiceAgentAdapters().map(adapter => scope.realtimeModelRuntime.registerAdapter(adapter)),
+      scope.taskModelRuntime.registerAdapter(doubaoAgentPlanSpeechAdapter({ audioArtifacts })),
+      audioArtifacts.register(scope),
+    ]
+    if (disposers.some(dispose => typeof dispose !== 'function')) throw new Error('Voice adapter registration must return a disposer')
     if (typeof scope.effect !== 'function') throw new Error('Voice Agent requires scope.effect lifecycle ownership')
     scope.effect(() => () => disposers.forEach(dispose => dispose()), 'dsh-realtime-voice.adapters')
     scope.effect(() => scope.webServer.register({
